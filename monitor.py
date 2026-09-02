@@ -5,7 +5,8 @@ import time
 import traceback
 import requests
 import growattServer
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Token Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -25,6 +26,7 @@ ACCOUNTS = [
 ]
 
 STATE_FILE = "state.json"
+TZ_ROME = ZoneInfo("Europe/Rome")
 
 CUSTOM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -60,12 +62,10 @@ def format_duration(seconds: float) -> str:
     return f"{mins} minuti"
 
 def get_italian_time_str(epoch_timestamp: float = None) -> str:
-    # Fuso orario italiano indicativo (UTC+2 estivo / UTC+1 solare)
-    tz_it = timezone(timedelta(hours=2))
     if epoch_timestamp:
-        dt = datetime.fromtimestamp(epoch_timestamp, tz=timezone.utc).astimezone(tz_it)
+        dt = datetime.fromtimestamp(epoch_timestamp, tz=TZ_ROME)
     else:
-        dt = datetime.now(timezone.utc).astimezone(tz_it)
+        dt = datetime.now(TZ_ROME)
     return dt.strftime("%H:%M")
 
 def send_telegram(message: str):
@@ -162,7 +162,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                 dev_alias = dev.get("deviceAilas") or dev.get("deviceAlias") or sn
                 display_name = f"{label} ({plant_name}) - {dev_alias}"
 
-                # Rilevamento stato dispositivo
+                # Controllo offline / lost
                 is_lost = dev.get("lost")
                 is_offline = (is_lost is True or str(is_lost).lower() == "true")
 
@@ -186,7 +186,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                 except (ValueError, TypeError):
                     pac = 0.0
 
-                # Determina l'anomalia corrente
+                # Verifica anomalia corrente
                 current_error_type = None
                 current_error_msg = ""
 
@@ -198,17 +198,15 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                     current_error_msg = f"Codice Guasto: <code>{fault_code}</code>"
                 elif is_daytime and pac == 0:
                     current_error_type = "PRODUZIONE_ZERO"
-                    current_error_msg = "Produzione a 0 W in pieno giorno."
+                    current_error_msg = "Produzione a 0 W nella fascia 09:00 - 18:00."
 
-                # Recupera lo stato precedente dell'inverter
                 inverter_state = state.get(sn, {})
                 was_in_error = inverter_state.get("in_error", False)
                 now_ts = time.time()
 
                 if current_error_type:
-                    # C'è un errore in corso
                     if not was_in_error:
-                        # NUOVO ERRORE -> Salva orario di inizio e invia primo alert
+                        # NUOVO ERRORE
                         state[sn] = {
                             "in_error": True,
                             "error_type": current_error_type,
@@ -224,13 +222,11 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                             f"🕒 Inizio anomalia: <b>{start_time_str}</b>"
                         )
                     else:
-                        # Errore ancora in corso -> non spamma notifiche, aggiorna solo log
                         dur_str = format_duration(now_ts - inverter_state.get("start_ts", now_ts))
-                        print(f"[-] {display_name} ancora in errore ({current_error_type}) da {dur_str}.")
+                        print(f"[-] {display_name} ancora in anomalia ({current_error_type}) da {dur_str}.")
                 else:
-                    # L'inverter è funzionante e regolare
                     if was_in_error:
-                        # ERA IN ERRORE ED È TORNATO ONLINE -> Invia notifica di ripristino con durata!
+                        # RIPRISTINO
                         start_ts = inverter_state.get("start_ts", now_ts)
                         duration_str = format_duration(now_ts - start_ts)
                         start_time_str = get_italian_time_str(start_ts)
@@ -238,7 +234,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                         prev_err = inverter_state.get("error_type", "ANOMALIA")
 
                         send_telegram(
-                            f"✅ <b>RIPRISTINO: INVERTER TORNATO OPERATIVO</b>\n\n"
+                            f"✅ <b>RIPRISTINO: INVERTER OPERATIVO</b>\n\n"
                             f"📍 <b>{display_name}</b>\n"
                             f"🔢 Seriale: <code>{sn}</code>\n"
                             f"🟢 Lo stato di <b>{prev_err}</b> è rientrato!\n"
@@ -246,7 +242,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                             f"⚡ Potenza Attuale: <b>{pac} W</b>"
                         )
 
-                        # Resetta lo stato
                         state[sn] = {
                             "in_error": False,
                             "last_resolved": now_ts
@@ -258,9 +253,12 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
             print(f"[-] Errore lettura {plant_name}: {e}")
 
 def main():
-    print(f"Avvio monitoraggio Growatt: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    now_hour_utc = datetime.now(timezone.utc).hour
-    is_daytime = 6 <= now_hour_utc <= 18
+    now_rome = datetime.now(TZ_ROME)
+    print(f"Avvio monitoraggio Growatt (Ora Italiana: {now_rome.strftime('%Y-%m-%d %H:%M:%S')})")
+    
+    # Fascia diurna attiva tra le 09:00 e le 18:00 (ora italiana)
+    is_daytime = 9 <= now_rome.hour < 18
+    print(f"Fascia controllo produzione 0W attiva (09-18): {is_daytime}")
 
     state = load_state()
 
@@ -268,7 +266,7 @@ def main():
         check_account(acc, is_daytime, state)
 
     save_state(state)
-    print("\n[+] Controllo completato e stato aggiornato.")
+    print("\n[+] Controllo completato.")
 
 if __name__ == "__main__":
     main()
