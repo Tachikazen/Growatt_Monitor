@@ -1,9 +1,11 @@
 import os
 import sys
+import json
+import time
 import traceback
 import requests
 import growattServer
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # Token Telegram
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,7 +24,8 @@ ACCOUNTS = [
     }
 ]
 
-# Header realistici per evitare il blocco 403 (Cloudflare/WAF)
+STATE_FILE = "state.json"
+
 CUSTOM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -32,8 +35,40 @@ CUSTOM_HEADERS = {
     "X-Requested-With": "XMLHttpRequest"
 }
 
+def load_state() -> dict:
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[-] Errore lettura {STATE_FILE}: {e}")
+    return {}
+
+def save_state(state: dict):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[-] Errore salvataggio {STATE_FILE}: {e}")
+
+def format_duration(seconds: float) -> str:
+    mins = int(seconds // 60)
+    hours = mins // 60
+    rem_mins = mins % 60
+    if hours > 0:
+        return f"{hours}h {rem_mins}m"
+    return f"{mins} minuti"
+
+def get_italian_time_str(epoch_timestamp: float = None) -> str:
+    # Fuso orario italiano indicativo (UTC+2 estivo / UTC+1 solare)
+    tz_it = timezone(timedelta(hours=2))
+    if epoch_timestamp:
+        dt = datetime.fromtimestamp(epoch_timestamp, tz=timezone.utc).astimezone(tz_it)
+    else:
+        dt = datetime.now(timezone.utc).astimezone(tz_it)
+    return dt.strftime("%H:%M")
+
 def send_telegram(message: str):
-    """Invia notifica Telegram in modo sicuro"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[-] ERRORE: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID mancanti.")
         return
@@ -49,7 +84,7 @@ def send_telegram(message: str):
         if res.status_code != 200:
             print(f"[-] Errore invio Telegram HTTP {res.status_code}: {res.text}")
         else:
-            print("[+] Notifica Telegram inviata con successo.")
+            print("[+] Notifica Telegram inviata.")
     except Exception as e:
         print(f"[-] Eccezione invio Telegram: {e}")
 
@@ -59,17 +94,16 @@ def create_growatt_session(server_url: str):
     api.session.headers.update(CUSTOM_HEADERS)
     return api
 
-def check_account(account_info: dict, is_daytime: bool):
+def check_account(account_info: dict, is_daytime: bool, state: dict):
     label = account_info["label"]
     user = (account_info["user"] or "").strip()
     password = (account_info["pass"] or "").strip()
 
     print(f"\n==================== CONTROLLO {label} ====================")
     if not user or not password:
-        print(f"[-] Credenziali mancanti per {label} (Controlla i Secrets su GitHub).")
+        print(f"[-] Credenziali mancanti per {label}.")
         return
 
-    # Proviamo prima il server principale e poi il server API se il primo fallisce
     servers = ["https://server.growatt.com/", "https://server-api.growatt.com/"]
     api = None
     login_res = None
@@ -77,7 +111,7 @@ def check_account(account_info: dict, is_daytime: bool):
 
     for srv in servers:
         try:
-            print(f"[*] Tentativo di login per '{user}' su {srv}...")
+            print(f"[*] Tentativo login su {srv}...")
             temp_api = create_growatt_session(srv)
             res = temp_api.login(user, password)
             if res and (isinstance(res, dict) or isinstance(res, list)):
@@ -86,18 +120,12 @@ def check_account(account_info: dict, is_daytime: bool):
                 print(f"[+] Login riuscito su {srv}!")
                 break
         except Exception as e:
-            print(f"[-] Tentativo su {srv} fallito: {e}")
             last_error = e
 
     if not api or not login_res:
-        send_telegram(
-            f"⚠️ <b>Growatt Monitor ({label})</b>\n"
-            f"Login fallito per <code>{user}</code>.\n"
-            f"Dettagli: {last_error}"
-        )
+        print(f"[-] Impossibile effettuare il login: {last_error}")
         return
 
-    # Estrazione user_id
     user_id = None
     if isinstance(login_res, dict):
         user_data = login_res.get("user")
@@ -106,26 +134,15 @@ def check_account(account_info: dict, is_daytime: bool):
         user_id = user_id or login_res.get("userId") or login_res.get("uid")
 
     if not user_id:
-        # Se la risposta non contiene un id valido (es. credenziali errate)
-        msg_err = login_res.get("msg") if isinstance(login_res, dict) else "Credenziali errate"
-        send_telegram(f"⚠️ <b>Growatt Monitor ({label})</b>\nLogin non riuscito per <code>{user}</code>: {msg_err}")
         return
 
-    print(f"[+] User ID autenticato: {user_id}")
-
-    # 2. Recupero Impianti
     try:
         plant_list_res = api.plant_list(user_id)
         plants = plant_list_res.get("data", []) if isinstance(plant_list_res, dict) else plant_list_res
-        if not plants:
-            print(f"[-] Nessun impianto trovato per l'utente {user}")
-            return
     except Exception as e:
-        print(f"[-] Errore recupero lista impianti: {e}")
-        traceback.print_exc()
+        print(f"[-] Errore lista impianti: {e}")
         return
 
-    # 3. Controllo Dispositivi
     for plant in plants:
         plant_id = plant.get("plantId") or plant.get("id")
         plant_name = plant.get("plantName", "Impianto")
@@ -145,18 +162,10 @@ def check_account(account_info: dict, is_daytime: bool):
                 dev_alias = dev.get("deviceAilas") or dev.get("deviceAlias") or sn
                 display_name = f"{label} ({plant_name}) - {dev_alias}"
 
-                # Controllo offline / lost
+                # Rilevamento stato dispositivo
                 is_lost = dev.get("lost")
-                if is_lost is True or str(is_lost).lower() == "true":
-                    send_telegram(
-                        f"🚨 <b>ALLARME: INVERTER OFFLINE</b>\n\n"
-                        f"📍 <b>{display_name}</b>\n"
-                        f"🔢 Seriale: <code>{sn}</code>\n"
-                        f"Stato: Inverter non raggiungibile o spento."
-                    )
-                    continue
+                is_offline = (is_lost is True or str(is_lost).lower() == "true")
 
-                # Lettura dettagli
                 detail = {}
                 try:
                     if "sph" in dev_type or "storage" in dev_type or "mix" in dev_type:
@@ -177,38 +186,89 @@ def check_account(account_info: dict, is_daytime: bool):
                 except (ValueError, TypeError):
                     pac = 0.0
 
-                # Segnalazione guasti o produzione ferma di giorno
-                if fault_code not in [0, "0", None, ""]:
-                    send_telegram(
-                        f"⚠️ <b>ALLARME: ERRORE INVERTER</b>\n\n"
-                        f"📍 <b>{display_name}</b>\n"
-                        f"🔢 Seriale: <code>{sn}</code>\n"
-                        f"⚠️ <b>Codice Errore: {fault_code}</b>\n"
-                        f"⚡ Potenza: <b>{pac} W</b>"
-                    )
+                # Determina l'anomalia corrente
+                current_error_type = None
+                current_error_msg = ""
+
+                if is_offline:
+                    current_error_type = "OFFLINE"
+                    current_error_msg = "L'inverter non comunica o la sezione Storage è disconnessa."
+                elif fault_code not in [0, "0", None, ""]:
+                    current_error_type = f"ERRORE {fault_code}"
+                    current_error_msg = f"Codice Guasto: <code>{fault_code}</code>"
                 elif is_daytime and pac == 0:
-                    send_telegram(
-                        f"⚠️ <b>AVVISO: PRODUZIONE ZERO</b>\n\n"
-                        f"📍 <b>{display_name}</b>\n"
-                        f"🔢 Seriale: <code>{sn}</code>\n"
-                        f"⚡ Produzione a <b>0 W</b> in pieno giorno."
-                    )
+                    current_error_type = "PRODUZIONE_ZERO"
+                    current_error_msg = "Produzione a 0 W in pieno giorno."
+
+                # Recupera lo stato precedente dell'inverter
+                inverter_state = state.get(sn, {})
+                was_in_error = inverter_state.get("in_error", False)
+                now_ts = time.time()
+
+                if current_error_type:
+                    # C'è un errore in corso
+                    if not was_in_error:
+                        # NUOVO ERRORE -> Salva orario di inizio e invia primo alert
+                        state[sn] = {
+                            "in_error": True,
+                            "error_type": current_error_type,
+                            "start_ts": now_ts,
+                            "display_name": display_name
+                        }
+                        start_time_str = get_italian_time_str(now_ts)
+                        send_telegram(
+                            f"🚨 <b>ALLARME: {current_error_type}</b>\n\n"
+                            f"📍 <b>{display_name}</b>\n"
+                            f"🔢 Seriale: <code>{sn}</code>\n"
+                            f"📝 {current_error_msg}\n"
+                            f"🕒 Inizio anomalia: <b>{start_time_str}</b>"
+                        )
+                    else:
+                        # Errore ancora in corso -> non spamma notifiche, aggiorna solo log
+                        dur_str = format_duration(now_ts - inverter_state.get("start_ts", now_ts))
+                        print(f"[-] {display_name} ancora in errore ({current_error_type}) da {dur_str}.")
                 else:
-                    print(f"[OK] {display_name} -> Operativo ({pac} W)")
+                    # L'inverter è funzionante e regolare
+                    if was_in_error:
+                        # ERA IN ERRORE ED È TORNATO ONLINE -> Invia notifica di ripristino con durata!
+                        start_ts = inverter_state.get("start_ts", now_ts)
+                        duration_str = format_duration(now_ts - start_ts)
+                        start_time_str = get_italian_time_str(start_ts)
+                        end_time_str = get_italian_time_str(now_ts)
+                        prev_err = inverter_state.get("error_type", "ANOMALIA")
+
+                        send_telegram(
+                            f"✅ <b>RIPRISTINO: INVERTER TORNATO OPERATIVO</b>\n\n"
+                            f"📍 <b>{display_name}</b>\n"
+                            f"🔢 Seriale: <code>{sn}</code>\n"
+                            f"🟢 Lo stato di <b>{prev_err}</b> è rientrato!\n"
+                            f"⏱️ <b>Durata anomalia:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
+                            f"⚡ Potenza Attuale: <b>{pac} W</b>"
+                        )
+
+                        # Resetta lo stato
+                        state[sn] = {
+                            "in_error": False,
+                            "last_resolved": now_ts
+                        }
+                    else:
+                        print(f"[OK] {display_name} regolare ({pac} W)")
 
         except Exception as e:
-            print(f"[-] Errore gestione impianto {plant_name}: {e}")
+            print(f"[-] Errore lettura {plant_name}: {e}")
 
 def main():
-    print(f"Avvio monitoraggio Growatt: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    now_hour_utc = datetime.utcnow().hour
-    # Ore diurne in Italia (circa 06:00 - 18:00 UTC)
+    print(f"Avvio monitoraggio Growatt: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    now_hour_utc = datetime.now(timezone.utc).hour
     is_daytime = 6 <= now_hour_utc <= 18
 
-    for acc in ACCOUNTS:
-        check_account(acc, is_daytime)
+    state = load_state()
 
-    print("\n[+] Controllo completato.")
+    for acc in ACCOUNTS:
+        check_account(acc, is_daytime, state)
+
+    save_state(state)
+    print("\n[+] Controllo completato e stato aggiornato.")
 
 if __name__ == "__main__":
     main()
