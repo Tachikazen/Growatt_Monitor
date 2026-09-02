@@ -2,9 +2,12 @@ name: Monitoraggio Growatt Inverter
 
 on:
   schedule:
-    # Esegue il controllo ogni 10 minuti (fuso orario UTC)
+    # Esegue il controllo ogni 10 minuti
     - cron: '*/10 * * * *'
-  workflow_dispatch: # Permette di avviarlo a mano per provarlo subito
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Permette di salvare state.json nel repository
 
 jobs:
   check:
@@ -30,3 +33,10 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor.py
+
+      - name: Salva stato contatore
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add state.json || true
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Aggiornato stato monitoraggio [skip ci]" && git push)
