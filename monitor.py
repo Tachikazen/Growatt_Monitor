@@ -68,6 +68,14 @@ def get_italian_time_str(epoch_timestamp: float = None) -> str:
         dt = datetime.now(TZ_ROME)
     return dt.strftime("%H:%M")
 
+def safe_float(val, default=0.0) -> float:
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("[-] ERRORE: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID mancanti.")
@@ -93,6 +101,22 @@ def create_growatt_session(server_url: str):
     api.server_url = server_url
     api.session.headers.update(CUSTOM_HEADERS)
     return api
+
+def get_real_power(detail: dict) -> float:
+    """Calcola la reale potenza prodotta (PV + Rete + Carica Batteria)"""
+    ppv = safe_float(detail.get("ppv"))
+    ppv1 = safe_float(detail.get("ppv1"))
+    ppv2 = safe_float(detail.get("ppv2"))
+    pac = safe_float(detail.get("pac"))
+    p_charge = safe_float(detail.get("pCharge1") or detail.get("chargePower"))
+    pac_to_user = safe_float(detail.get("pacToUserTotal") or detail.get("pacToLocalTotal"))
+
+    # Potenza solare effettiva (stringhe o totale PV)
+    solar_power = ppv if ppv > 0 else (ppv1 + ppv2)
+
+    # Potenza complessiva in gioco (inclusa eventuale carica batteria o uscita diretta)
+    total_power = max(solar_power, pac, p_charge, pac_to_user)
+    return total_power
 
 def check_account(account_info: dict, is_daytime: bool, state: dict):
     label = account_info["label"]
@@ -162,7 +186,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                 dev_alias = dev.get("deviceAilas") or dev.get("deviceAlias") or sn
                 display_name = f"{label} ({plant_name}) - {dev_alias}"
 
-                # Controllo offline / lost
+                # Stato Offline
                 is_lost = dev.get("lost")
                 is_offline = (is_lost is True or str(is_lost).lower() == "true")
 
@@ -180,38 +204,57 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                     except Exception:
                         detail = {}
 
+                # Lettura parametri reali
+                real_power = get_real_power(detail)
                 fault_code = detail.get("faultType") or detail.get("faultCode") or 0
-                try:
-                    pac = float(detail.get("pac") or detail.get("ppv") or detail.get("pacToGridTotal") or 0)
-                except (ValueError, TypeError):
-                    pac = 0.0
+                inv_status = str(detail.get("status", "")).strip()
 
-                # Verifica anomalia corrente
+                print(f"[*] {display_name} -> Stato: '{inv_status}', Guasto: {fault_code}, Potenza Rilevata: {real_power} W")
+
+                # Recupera stato precedente
+                inverter_state = state.get(sn, {})
+                was_in_error = inverter_state.get("in_error", False)
+                zero_count = inverter_state.get("zero_count", 0)
+                now_ts = time.time()
+
                 current_error_type = None
                 current_error_msg = ""
 
+                # 1. Controllo Disconnessione
                 if is_offline:
                     current_error_type = "OFFLINE"
-                    current_error_msg = "L'inverter non comunica o la sezione Storage è disconnessa."
-                elif fault_code not in [0, "0", None, ""]:
+                    current_error_msg = "L'inverter non comunica con la rete o è spento."
+                    zero_count = 0
+
+                # 2. Controllo Codici di Errore / Fault reali
+                elif fault_code not in [0, "0", None, "", "00"]:
                     current_error_type = f"ERRORE {fault_code}"
                     current_error_msg = f"Codice Guasto: <code>{fault_code}</code>"
-                elif is_daytime and pac == 0:
-                    current_error_type = "PRODUZIONE_ZERO"
-                    current_error_msg = "Produzione a 0 W nella fascia 09:00 - 18:00."
+                    zero_count = 0
 
-                inverter_state = state.get(sn, {})
-                was_in_error = inverter_state.get("in_error", False)
-                now_ts = time.time()
+                # 3. Controllo Produzione a Zero di giorno (con filtro anti-falso positivo)
+                elif is_daytime and real_power == 0 and inv_status not in ["1", "2", "Normal", "normal"]:
+                    zero_count += 1
+                    # Allarma solo se la produzione è a zero per almeno 2 verifiche di fila (20 minuti)
+                    if zero_count >= 2:
+                        current_error_type = "PRODUZIONE_ZERO"
+                        current_error_msg = f"Produzione ferma a 0 W nella fascia oraria diurna ({zero_count * 10} minuti consecutivi)."
+                    else:
+                        print(f"[*] {display_name}: Rilevato 0W per la prima volta. In attesa di conferma al prossimo ciclo.")
+                else:
+                    # Funzionamento regolare: azzera il contatore di 0W
+                    zero_count = 0
 
+                # Gestione notifiche di Stato e Ripristino
                 if current_error_type:
                     if not was_in_error:
-                        # NUOVO ERRORE
+                        # Nuovo errore confermato
                         state[sn] = {
                             "in_error": True,
                             "error_type": current_error_type,
                             "start_ts": now_ts,
-                            "display_name": display_name
+                            "display_name": display_name,
+                            "zero_count": zero_count
                         }
                         start_time_str = get_italian_time_str(now_ts)
                         send_telegram(
@@ -222,11 +265,12 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                             f"🕒 Inizio anomalia: <b>{start_time_str}</b>"
                         )
                     else:
+                        state[sn]["zero_count"] = zero_count
                         dur_str = format_duration(now_ts - inverter_state.get("start_ts", now_ts))
                         print(f"[-] {display_name} ancora in anomalia ({current_error_type}) da {dur_str}.")
                 else:
                     if was_in_error:
-                        # RIPRISTINO
+                        # Ripristino da un errore reale
                         start_ts = inverter_state.get("start_ts", now_ts)
                         duration_str = format_duration(now_ts - start_ts)
                         start_time_str = get_italian_time_str(start_ts)
@@ -238,16 +282,22 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
                             f"📍 <b>{display_name}</b>\n"
                             f"🔢 Seriale: <code>{sn}</code>\n"
                             f"🟢 Lo stato di <b>{prev_err}</b> è rientrato!\n"
-                            f"⏱️ <b>Durata anomalia:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
-                            f"⚡ Potenza Attuale: <b>{pac} W</b>"
+                            f"⏱️ <b>Durata:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
+                            f"⚡ Potenza Attuale: <b>{real_power} W</b>"
                         )
 
                         state[sn] = {
                             "in_error": False,
-                            "last_resolved": now_ts
+                            "last_resolved": now_ts,
+                            "zero_count": 0
                         }
                     else:
-                        print(f"[OK] {display_name} regolare ({pac} W)")
+                        # Aggiorna il contatore provvisorio nello stato
+                        if sn not in state:
+                            state[sn] = {}
+                        state[sn]["zero_count"] = zero_count
+                        state[sn]["in_error"] = False
+                        print(f"[OK] {display_name} regolare ({real_power} W)")
 
         except Exception as e:
             print(f"[-] Errore lettura {plant_name}: {e}")
@@ -255,10 +305,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict):
 def main():
     now_rome = datetime.now(TZ_ROME)
     print(f"Avvio monitoraggio Growatt (Ora Italiana: {now_rome.strftime('%Y-%m-%d %H:%M:%S')})")
-    
-    # Fascia diurna attiva tra le 09:00 e le 18:00 (ora italiana)
     is_daytime = 9 <= now_rome.hour < 18
-    print(f"Fascia controllo produzione 0W attiva (09-18): {is_daytime}")
 
     state = load_state()
 
