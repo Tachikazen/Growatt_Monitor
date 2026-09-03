@@ -1,14 +1,1 @@
-{
-  "QCM0DA70C6": {
-    "in_error": true,
-    "error_type": "PRODUZIONE_ZERO",
-    "start_ts": 1788432242.6004112,
-    "display_name": "Impianto 1 (TONELLO DARIO) - QCM0DA70C6"
-  },
-  "QCM0DA70BL": {
-    "in_error": true,
-    "error_type": "OFFLINE",
-    "start_ts": 1788360270.2029276,
-    "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL"
-  }
-}
+
