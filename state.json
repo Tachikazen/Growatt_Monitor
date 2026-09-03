@@ -5,8 +5,10 @@
     "zero_count": 0
   },
   "QCM0DA70BL": {
-    "in_error": false,
-    "last_resolved": 1788453048.9331365,
+    "in_error": true,
+    "error_type": "OFFLINE",
+    "start_ts": 1788456647.3202305,
+    "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
     "zero_count": 0
   }
 }
