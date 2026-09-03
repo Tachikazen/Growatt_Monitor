@@ -8,7 +8,7 @@ import growattServer
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# Token Telegram
+# Token Telegram (prelevati dai Secrets)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -75,7 +75,7 @@ def safe_float(val, default=0.0) -> float:
     try:
         if val is None:
             return default
-        return float(val)
+        return float(str(val).replace("W", "").replace("kW", "").replace("%", "").strip())
     except (ValueError, TypeError):
         return default
 
@@ -99,22 +99,11 @@ def send_telegram(message: str):
     except Exception as e:
         print(f"[-] Eccezione invio Telegram: {e}")
 
-def create_growatt_session(server_url: str):
+def create_growatt_session():
     api = growattServer.GrowattApi()
-    api.server_url = server_url
+    api.server_url = "https://server.growatt.com/"
     api.session.headers.update(CUSTOM_HEADERS)
     return api
-
-def get_real_power(detail: dict) -> float:
-    ppv = safe_float(detail.get("ppv"))
-    ppv1 = safe_float(detail.get("ppv1"))
-    ppv2 = safe_float(detail.get("ppv2"))
-    pac = safe_float(detail.get("pac"))
-    p_charge = safe_float(detail.get("pCharge1") or detail.get("chargePower"))
-    pac_to_user = safe_float(detail.get("pacToUserTotal") or detail.get("pacToLocalTotal"))
-
-    solar_power = ppv if ppv > 0 else (ppv1 + ppv2)
-    return max(solar_power, pac, p_charge, pac_to_user)
 
 def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats: list):
     label = account_info["label"]
@@ -126,26 +115,11 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
         print(f"[-] Credenziali mancanti per {label}.")
         return
 
-    servers = ["https://server.growatt.com/", "https://server-api.growatt.com/"]
-    api = None
-    login_res = None
-    last_error = None
-
-    for srv in servers:
-        try:
-            print(f"[*] Tentativo login su {srv}...")
-            temp_api = create_growatt_session(srv)
-            res = temp_api.login(user, password)
-            if res and (isinstance(res, dict) or isinstance(res, list)):
-                api = temp_api
-                login_res = res
-                print(f"[+] Login riuscito su {srv}!")
-                break
-        except Exception as e:
-            last_error = e
-
-    if not api or not login_res:
-        print(f"[-] Impossibile effettuare il login: {last_error}")
+    api = create_growatt_session()
+    try:
+        login_res = api.login(user, password)
+    except Exception as e:
+        print(f"[-] Errore login: {e}")
         return
 
     user_id = None
@@ -156,6 +130,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
         user_id = user_id or login_res.get("userId") or login_res.get("uid")
 
     if not user_id:
+        print(f"[-] Login fallito per user {user}")
         return
 
     try:
@@ -166,7 +141,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
         return
 
     for plant in plants:
-        plant_id = plant.get("plantId") or plant.get("id")
+        plant_id = str(plant.get("plantId") or plant.get("id"))
         plant_name = plant.get("plantName", "Impianto")
 
         try:
@@ -180,46 +155,50 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                     continue
 
                 sn = dev.get("deviceSn") or dev.get("sn")
-                dev_type = str(dev.get("deviceType", "")).lower()
                 dev_alias = dev.get("deviceAilas") or dev.get("deviceAlias") or sn
                 display_name = f"{label} ({plant_name}) - {dev_alias}"
 
                 is_lost_dev = dev.get("lost")
                 lost_from_list = (is_lost_dev is True or str(is_lost_dev).lower() == "true")
 
-                detail = {}
+                # Dati specifici Inverter SPH/MIX
+                sys_status = {}
+                totals = {}
                 try:
-                    if "sph" in dev_type or "storage" in dev_type or "mix" in dev_type:
-                        detail = api.sph_detail(sn)
-                    elif "tlx" in dev_type or "min" in dev_type:
-                        detail = api.mix_detail(sn)
-                    else:
-                        detail = api.inverter_detail(sn)
-                except Exception:
-                    try:
-                        detail = api.inverter_detail(sn)
-                    except Exception:
-                        detail = {}
+                    sys_status = api.mix_system_status(sn, plant_id)
+                except Exception as ex:
+                    print(f"[-] Errore mix_system_status per {sn}: {ex}")
 
-                real_power = get_real_power(detail)
-                fault_code = detail.get("faultType") or detail.get("faultCode") or 0
-                inv_status = str(detail.get("status", "")).strip()
+                try:
+                    totals = api.mix_totals(sn, plant_id)
+                except Exception as ex:
+                    print(f"[-] Errore mix_totals per {sn}: {ex}")
 
-                # Verifica stato Offline: è offline solo se è lost E non ci sono dati attivi da sph_detail
-                has_active_telemetry = (detail and (real_power > 0 or inv_status in ["1", "2", "Normal", "normal"]))
-                is_offline = lost_from_list and not has_active_telemetry
+                # Calcolo potenze in Watt
+                ppv_kw = safe_float(sys_status.get("ppv") or sys_status.get("storagePpv"))
+                p_pv1_kw = safe_float(sys_status.get("pPv1"))
+                p_pv2_kw = safe_float(sys_status.get("pPv2"))
+                solar_kw = ppv_kw if ppv_kw > 0 else (p_pv1_kw + p_pv2_kw)
+                solar_w = round(solar_kw * 1000.0, 1)
 
-                # Statistiche giornaliere
-                e_today = safe_float(detail.get("epvToday") or detail.get("eToday") or detail.get("eActoday"))
-                e_to_grid = safe_float(detail.get("eToGridToday") or detail.get("eGridToday"))
-                e_to_user = safe_float(detail.get("eToUserToday") or detail.get("elocalLoadToday") or detail.get("eSelfToday"))
-                
+                p_grid_w = round(safe_float(sys_status.get("pactogrid")) * 1000.0, 1)
+                p_load_w = round(safe_float(sys_status.get("pLocalLoad")) * 1000.0, 1)
+                soc = safe_float(sys_status.get("SOC") or dev.get("capacity"))
+                v_bat = safe_float(sys_status.get("vBat"))
+
+                inv_status = str(sys_status.get("status") or dev.get("deviceStatus") or "").strip()
+                status_desc = str(sys_status.get("lost") or "").strip()
+                fault_code = sys_status.get("proPto") or dev.get("proPto") or 0
+
+                # Dati energetici odierni in kWh
+                e_today = safe_float(totals.get("epvToday") or plant.get("todayEnergy"))
+                e_to_grid = safe_float(totals.get("etoGridToday"))
+                e_to_user = safe_float(totals.get("elocalLoadToday"))
+                e_charge = safe_float(totals.get("echargetoday") or dev.get("eChargeToday"))
+                e_discharge = safe_float(totals.get("edischarge1Today"))
+
                 if e_to_user == 0.0 and e_today > 0 and e_today >= e_to_grid:
                     e_to_user = round(e_today - e_to_grid, 2)
-
-                soc = detail.get("soc") or detail.get("SOC")
-                e_charge = safe_float(detail.get("eChargeToday"))
-                e_discharge = safe_float(detail.get("eDisChargeToday"))
 
                 daily_stats.append({
                     "label": display_name,
@@ -231,9 +210,16 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                     "e_discharge": e_discharge
                 })
 
-                print(f"[*] {display_name} -> Offline:{is_offline} | Stato:'{inv_status}' | Guasto:{fault_code} | Potenza:{real_power}W")
+                print(f"[+] {display_name}:")
+                print(f"    - Solare: {solar_w} W (P1: {round(p_pv1_kw*1000)}W, P2: {round(p_pv2_kw*1000)}W)")
+                print(f"    - Rete: {p_grid_w} W | Casa: {p_load_w} W | Batteria: {soc}% ({v_bat}V)")
+                print(f"    - Energia Oggi: {e_today} kWh (Rete: {e_to_grid} kWh, Casa: {e_to_user} kWh)")
+                print(f"    - Stato: '{inv_status}' ({status_desc}) | Guasto: {fault_code} | Lost: {lost_from_list}")
 
-                # Recupera stato precedente memorizzato
+                # Verifica Offline reale
+                has_telemetry = (sys_status and (solar_w > 0 or p_load_w > 0 or p_grid_w > 0 or inv_status in ["1", "5", "normal"]))
+                is_offline = lost_from_list and not has_telemetry
+
                 inverter_state = state.get(sn, {})
                 was_in_error = inverter_state.get("in_error", False)
                 zero_count = inverter_state.get("zero_count", 0)
@@ -250,18 +236,16 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                     current_error_type = f"ERRORE {fault_code}"
                     current_error_msg = f"Codice Guasto: <code>{fault_code}</code>"
                     zero_count = 0
-                elif is_daytime and real_power == 0 and inv_status not in ["1", "2", "Normal", "normal"]:
+                elif is_daytime and solar_w == 0 and inv_status not in ["1", "5", "Normal", "normal"]:
                     zero_count += 1
-                    if zero_count >= 2:
+                    if zero_count >= 3:
                         current_error_type = "PRODUZIONE_ZERO"
-                        current_error_msg = f"Produzione ferma a 0 W nella fascia diurna ({zero_count * 10} min)."
+                        current_error_msg = f"Produzione solare ferma a 0 W nella fascia 09-18 ({zero_count * 10} min)."
                 else:
                     zero_count = 0
 
-                # Gestione Transizione Stato (Allarme vs Ripristino)
                 if current_error_type:
                     if not was_in_error:
-                        # ENTRATO IN ANOMALIA
                         state[sn] = {
                             "in_error": True,
                             "error_type": current_error_type,
@@ -282,23 +266,21 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                         dur_str = format_duration(now_ts - inverter_state.get("start_ts", now_ts))
                         print(f"[-] {display_name} ancora in anomalia ({current_error_type}) da {dur_str}.")
                 else:
-                    # NESSUN ERRORE PRESENTE
                     if was_in_error:
-                        # ERA IN ANOMALIA -> INVIO NOTIFICA DI RIPRISTINO!
                         start_ts = inverter_state.get("start_ts", now_ts)
                         duration_str = format_duration(now_ts - start_ts)
                         start_time_str = get_italian_time_str(start_ts)
                         end_time_str = get_italian_time_str(now_ts)
                         prev_err = inverter_state.get("error_type", "OFFLINE/ANOMALIA")
 
-                        print(f"[+] Invio notifica di ripristino per {display_name} (durata: {duration_str})")
+                        print(f"[+] Invio ripristino per {display_name} (durata: {duration_str})")
                         send_telegram(
                             f"✅ <b>RIPRISTINO: INVERTER TORNATO OPERATIVO</b>\n\n"
                             f"📍 <b>{display_name}</b>\n"
                             f"🔢 Seriale: <code>{sn}</code>\n"
                             f"🟢 Lo stato di <b>{prev_err}</b> è rientrato!\n"
                             f"⏱️ <b>Durata anomalia:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
-                            f"⚡ Potenza Attuale: <b>{real_power} W</b>"
+                            f"⚡ Potenza Solare Attuale: <b>{solar_w} W</b>"
                         )
 
                         state[sn] = {
@@ -314,6 +296,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
 
         except Exception as e:
             print(f"[-] Errore lettura {plant_name}: {e}")
+            traceback.print_exc()
 
 def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
     today_str = now_rome.strftime("%Y-%m-%d")
@@ -343,7 +326,7 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
             msg += f"🔌 Immessa in Rete: <b>{grid:.2f} kWh</b> ({pct_grid}%)\n"
 
             if item.get("soc") is not None:
-                msg += f"🔋 Batteria: <b>{item['soc']}%</b>"
+                msg += f"🔋 Batteria: <b>{item['soc']:.0f}%</b>"
                 if item.get("e_charge", 0) > 0 or item.get("e_discharge", 0) > 0:
                     msg += f" (Carica: {item['e_charge']:.1f} kWh | Scarica: {item['e_discharge']:.1f} kWh)"
                 msg += "\n"
@@ -369,7 +352,6 @@ def main():
     is_daytime = 9 <= now_rome.hour < 18
 
     state = load_state()
-    print(f"[*] Stato caricato da memoria: {json.dumps(state)}")
     daily_stats = []
 
     for acc in ACCOUNTS:
@@ -378,7 +360,7 @@ def main():
     handle_daily_report(now_rome, daily_stats, state)
 
     save_state(state)
-    print("\n[+] Controllo completato.")
+    print("\n[+] Controllo completato con successo.")
 
 if __name__ == "__main__":
     main()
