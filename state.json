@@ -1,7 +1,9 @@
 {
   "QCM0DA70C6": {
-    "in_error": false,
-    "last_resolved": 1788372496.2749698
+    "in_error": true,
+    "error_type": "PRODUZIONE_ZERO",
+    "start_ts": 1788432242.6004112,
+    "display_name": "Impianto 1 (TONELLO DARIO) - QCM0DA70C6"
   },
   "QCM0DA70BL": {
     "in_error": true,
