@@ -41,7 +41,9 @@ def load_state() -> dict:
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                content = f.read().strip()
+                if content:
+                    return json.loads(content)
         except Exception as e:
             print(f"[-] Errore lettura {STATE_FILE}: {e}")
     return {}
@@ -50,11 +52,12 @@ def save_state(state: dict):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
+        print(f"[+] Stato salvato correttamente in {STATE_FILE}.")
     except Exception as e:
         print(f"[-] Errore salvataggio {STATE_FILE}: {e}")
 
 def format_duration(seconds: float) -> str:
-    mins = int(seconds // 60)
+    mins = int(max(1, seconds // 60))
     hours = mins // 60
     rem_mins = mins % 60
     if hours > 0:
@@ -103,7 +106,6 @@ def create_growatt_session(server_url: str):
     return api
 
 def get_real_power(detail: dict) -> float:
-    """Calcola la reale potenza istantanea prodotta (PV + Rete + Carica Batteria)"""
     ppv = safe_float(detail.get("ppv"))
     ppv1 = safe_float(detail.get("ppv1"))
     ppv2 = safe_float(detail.get("ppv2"))
@@ -182,9 +184,8 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 dev_alias = dev.get("deviceAilas") or dev.get("deviceAlias") or sn
                 display_name = f"{label} ({plant_name}) - {dev_alias}"
 
-                # Stato Offline
-                is_lost = dev.get("lost")
-                is_offline = (is_lost is True or str(is_lost).lower() == "true")
+                is_lost_dev = dev.get("lost")
+                lost_from_list = (is_lost_dev is True or str(is_lost_dev).lower() == "true")
 
                 detail = {}
                 try:
@@ -200,17 +201,19 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                     except Exception:
                         detail = {}
 
-                # Lettura parametri istantanei
                 real_power = get_real_power(detail)
                 fault_code = detail.get("faultType") or detail.get("faultCode") or 0
                 inv_status = str(detail.get("status", "")).strip()
 
-                # Raccolta dati energetici giornalieri per il Report
+                # Verifica stato Offline: è offline solo se è lost E non ci sono dati attivi da sph_detail
+                has_active_telemetry = (detail and (real_power > 0 or inv_status in ["1", "2", "Normal", "normal"]))
+                is_offline = lost_from_list and not has_active_telemetry
+
+                # Statistiche giornaliere
                 e_today = safe_float(detail.get("epvToday") or detail.get("eToday") or detail.get("eActoday"))
                 e_to_grid = safe_float(detail.get("eToGridToday") or detail.get("eGridToday"))
                 e_to_user = safe_float(detail.get("eToUserToday") or detail.get("elocalLoadToday") or detail.get("eSelfToday"))
                 
-                # Se l'autoconsumo non è esplicitato, lo ricaviamo per differenza (Produzione - Immissione)
                 if e_to_user == 0.0 and e_today > 0 and e_today >= e_to_grid:
                     e_to_user = round(e_today - e_to_grid, 2)
 
@@ -228,10 +231,9 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                     "e_discharge": e_discharge
                 })
 
-                # Log di controllo
-                print(f"[*] {display_name} -> Stato: '{inv_status}', Guasto: {fault_code}, Potenza: {real_power} W | Oggi: {e_today} kWh")
+                print(f"[*] {display_name} -> Offline:{is_offline} | Stato:'{inv_status}' | Guasto:{fault_code} | Potenza:{real_power}W")
 
-                # Controllo Anomalie / Notifiche
+                # Recupera stato precedente memorizzato
                 inverter_state = state.get(sn, {})
                 was_in_error = inverter_state.get("in_error", False)
                 zero_count = inverter_state.get("zero_count", 0)
@@ -252,12 +254,14 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                     zero_count += 1
                     if zero_count >= 2:
                         current_error_type = "PRODUZIONE_ZERO"
-                        current_error_msg = f"Produzione ferma a 0 W nella fascia oraria diurna ({zero_count * 10} minuti consecutivi)."
+                        current_error_msg = f"Produzione ferma a 0 W nella fascia diurna ({zero_count * 10} min)."
                 else:
                     zero_count = 0
 
+                # Gestione Transizione Stato (Allarme vs Ripristino)
                 if current_error_type:
                     if not was_in_error:
+                        # ENTRATO IN ANOMALIA
                         state[sn] = {
                             "in_error": True,
                             "error_type": current_error_type,
@@ -278,19 +282,22 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                         dur_str = format_duration(now_ts - inverter_state.get("start_ts", now_ts))
                         print(f"[-] {display_name} ancora in anomalia ({current_error_type}) da {dur_str}.")
                 else:
+                    # NESSUN ERRORE PRESENTE
                     if was_in_error:
+                        # ERA IN ANOMALIA -> INVIO NOTIFICA DI RIPRISTINO!
                         start_ts = inverter_state.get("start_ts", now_ts)
                         duration_str = format_duration(now_ts - start_ts)
                         start_time_str = get_italian_time_str(start_ts)
                         end_time_str = get_italian_time_str(now_ts)
-                        prev_err = inverter_state.get("error_type", "ANOMALIA")
+                        prev_err = inverter_state.get("error_type", "OFFLINE/ANOMALIA")
 
+                        print(f"[+] Invio notifica di ripristino per {display_name} (durata: {duration_str})")
                         send_telegram(
-                            f"✅ <b>RIPRISTINO: INVERTER OPERATIVO</b>\n\n"
+                            f"✅ <b>RIPRISTINO: INVERTER TORNATO OPERATIVO</b>\n\n"
                             f"📍 <b>{display_name}</b>\n"
                             f"🔢 Seriale: <code>{sn}</code>\n"
                             f"🟢 Lo stato di <b>{prev_err}</b> è rientrato!\n"
-                            f"⏱️ <b>Durata:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
+                            f"⏱️ <b>Durata anomalia:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
                             f"⚡ Potenza Attuale: <b>{real_power} W</b>"
                         )
 
@@ -309,11 +316,9 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
             print(f"[-] Errore lettura {plant_name}: {e}")
 
 def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
-    """Invia il report serale di produzione, immissione e autoconsumo alle 21:00"""
     today_str = now_rome.strftime("%Y-%m-%d")
     last_report_date = state.get("last_daily_report_date")
 
-    # Invia il report se sono le 21:00 o successive (ora italiana) e non è ancora stato inviato oggi
     if now_rome.hour >= 21 and last_report_date != today_str and daily_stats:
         print("[*] Generazione del Report Giornaliero...")
         
@@ -329,7 +334,6 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
             grid = item["e_to_grid"]
             user = item["e_to_user"]
             
-            # Calcolo percentuali
             pct_user = round((user / prod * 100), 1) if prod > 0 else 0
             pct_grid = round((grid / prod * 100), 1) if prod > 0 else 0
 
@@ -345,7 +349,6 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
                 msg += "\n"
             msg += "\n"
 
-        # Se ci sono 2 o più impianti, aggiungiamo il totale complessivo
         if len(daily_stats) > 1:
             tot_pct_user = round((tot_user / tot_production * 100), 1) if tot_production > 0 else 0
             tot_pct_grid = round((tot_grid / tot_production * 100), 1) if tot_production > 0 else 0
@@ -358,7 +361,7 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
 
         send_telegram(msg)
         state["last_daily_report_date"] = today_str
-        print("[+] Report Giornaliero inviato con successo!")
+        print("[+] Report Giornaliero inviato!")
 
 def main():
     now_rome = datetime.now(TZ_ROME)
@@ -366,12 +369,12 @@ def main():
     is_daytime = 9 <= now_rome.hour < 18
 
     state = load_state()
+    print(f"[*] Stato caricato da memoria: {json.dumps(state)}")
     daily_stats = []
 
     for acc in ACCOUNTS:
         check_account(acc, is_daytime, state, daily_stats)
 
-    # Controllo e invio eventuale report serale
     handle_daily_report(now_rome, daily_stats, state)
 
     save_state(state)
