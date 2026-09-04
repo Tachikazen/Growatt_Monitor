@@ -12,5 +12,8 @@
     "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
     "zero_count": 0
   },
-  "last_daily_report_date": "2026-09-03"
+  "last_daily_report_date": "2026-09-03",
+  "monthly": {
+    "2026-09": {}
+  }
 }
