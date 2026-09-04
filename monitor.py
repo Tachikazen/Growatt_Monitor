@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import calendar
 import traceback
 import requests
 import growattServer
@@ -27,6 +28,12 @@ ACCOUNTS = [
 
 STATE_FILE = "state.json"
 TZ_ROME = ZoneInfo("Europe/Rome")
+
+MONTH_NAMES_IT = {
+    1: "Gennaio", 2: "Febbraio", 3: "Marzo", 4: "Aprile",
+    5: "Maggio", 6: "Giugno", 7: "Luglio", 8: "Agosto",
+    9: "Settembre", 10: "Ottobre", 11: "Novembre", 12: "Dicembre"
+}
 
 CUSTOM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -161,7 +168,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 is_lost_dev = dev.get("lost")
                 lost_from_list = (is_lost_dev is True or str(is_lost_dev).lower() == "true")
 
-                # Dati specifici Inverter SPH/MIX
                 sys_status = {}
                 totals = {}
                 try:
@@ -174,7 +180,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 except Exception as ex:
                     print(f"[-] Errore mix_totals per {sn}: {ex}")
 
-                # Calcolo potenze in Watt
                 ppv_kw = safe_float(sys_status.get("ppv") or sys_status.get("storagePpv"))
                 p_pv1_kw = safe_float(sys_status.get("pPv1"))
                 p_pv2_kw = safe_float(sys_status.get("pPv2"))
@@ -184,7 +189,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 p_grid_w = round(safe_float(sys_status.get("pactogrid")) * 1000.0, 1)
                 p_load_w = round(safe_float(sys_status.get("pLocalLoad")) * 1000.0, 1)
                 
-                # Lettura percentuale Batteria
                 soc_raw = sys_status.get("SOC") or dev.get("capacity")
                 soc = safe_float(soc_raw) if soc_raw is not None else None
                 v_bat = safe_float(sys_status.get("vBat"))
@@ -193,7 +197,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 status_desc = str(sys_status.get("lost") or "").strip()
                 fault_code = sys_status.get("proPto") or dev.get("proPto") or 0
 
-                # Dati energetici odierni in kWh
                 e_today = safe_float(totals.get("epvToday") or plant.get("todayEnergy") or dev.get("eToday"))
                 e_to_grid = safe_float(totals.get("etoGridToday"))
                 e_to_user = safe_float(totals.get("elocalLoadToday"))
@@ -203,19 +206,15 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 if e_to_user == 0.0 and e_today > 0 and e_today >= e_to_grid:
                     e_to_user = round(e_today - e_to_grid, 2)
 
-                # Verifica Offline reale
                 has_telemetry = bool(sys_status and (solar_w > 0 or p_load_w > 0 or p_grid_w > 0 or inv_status in ["1", "5", "normal"]))
                 is_offline = lost_from_list and not has_telemetry
 
-                # Gestione memoria di stato
                 if sn not in state:
                     state[sn] = {}
                 
-                # Se la lettura della batteria è valida, aggiorniamo l'ultimo valore noto in memoria
                 if soc is not None and soc > 0:
                     state[sn]["last_known_soc"] = soc
 
-                # Raccolta statistiche per il Report serale
                 daily_stats.append({
                     "sn": sn,
                     "label": display_name,
@@ -282,7 +281,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                         print(f"[-] {display_name} ancora in anomalia ({current_error_type}) da {dur_str}.")
                 else:
                     if was_in_error:
-                        # INVIO NOTIFICA DI RIPRISTINO (con Batteria inclusa)
                         start_ts = inverter_state.get("start_ts", now_ts)
                         duration_str = format_duration(now_ts - start_ts)
                         start_time_str = get_italian_time_str(start_ts)
@@ -315,13 +313,92 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
             print(f"[-] Errore lettura {plant_name}: {e}")
             traceback.print_exc()
 
-def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
-    today_str = now_rome.strftime("%Y-%m-%d")
-    last_report_date = state.get("last_daily_report_date")
+def format_monthly_report(now_rome: datetime, month_key: str, month_data: dict) -> str:
+    month_num = int(month_key.split("-")[1])
+    year_num = int(month_key.split("-")[0])
+    month_name = MONTH_NAMES_IT.get(month_num, month_key)
 
-    if now_rome.hour >= 21 and last_report_date != today_str and daily_stats:
+    tot_prod = 0.0
+    tot_grid = 0.0
+    tot_user = 0.0
+
+    msg = f"🏆 <b>REPORT MENSILE FOTOVOLTAICO - {month_name.upper()} {year_num}</b>\n"
+    msg += f"📅 <i>Riepilogo energetico del mese</i>\n\n"
+
+    for sn, d in month_data.items():
+        label = d.get("label", sn)
+        prod = d.get("production", 0.0)
+        grid = d.get("to_grid", 0.0)
+        user = d.get("to_user", 0.0)
+        charge = d.get("charge", 0.0)
+        num_days = len(d.get("days", [])) or 1
+
+        avg_daily = prod / num_days if num_days > 0 else 0.0
+        pct_user = round((user / prod * 100), 1) if prod > 0 else 0
+        pct_grid = round((grid / prod * 100), 1) if prod > 0 else 0
+
+        tot_prod += prod
+        tot_grid += grid
+        tot_user += user
+
+        msg += f"📍 <b>{label}</b>\n"
+        msg += f"☀️ Produzione Mese: <b>{prod:.2f} kWh</b> (Media: {avg_daily:.1f} kWh/giorno)\n"
+        msg += f"🏠 Autoconsumo: <b>{user:.2f} kWh</b> ({pct_user}%)\n"
+        msg += f"🔌 Immessa in Rete: <b>{grid:.2f} kWh</b> ({pct_grid}%)\n"
+        if charge > 0:
+            msg += f"🔋 Batteria: <b>{charge:.1f} kWh</b> accumulati\n"
+        msg += "\n"
+
+    if len(month_data) > 1:
+        tot_pct_user = round((tot_user / tot_prod * 100), 1) if tot_prod > 0 else 0
+        tot_pct_grid = round((tot_grid / tot_prod * 100), 1) if tot_prod > 0 else 0
+
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += "🌟 <b>TOTALE MENSILE COMPLESSIVO</b>\n"
+        msg += f"☀️ Produzione Totale: <b>{tot_prod:.2f} kWh</b>\n"
+        msg += f"🏠 Autoconsumo Totale: <b>{tot_user:.2f} kWh</b> ({tot_pct_user}%)\n"
+        msg += f"🔌 Immissione Totale: <b>{tot_grid:.2f} kWh</b> ({tot_pct_grid}%)\n"
+
+    return msg
+
+def handle_reports(now_rome: datetime, daily_stats: list, state: dict):
+    today_str = now_rome.strftime("%Y-%m-%d")
+    month_key = now_rome.strftime("%Y-%m")
+    last_daily_date = state.get("last_daily_report_date")
+    last_monthly_date = state.get("last_monthly_report_date")
+
+    if "monthly" not in state:
+        state["monthly"] = {}
+    if month_key not in state["monthly"]:
+        state["monthly"][month_key] = {}
+
+    # 1. REPORT GIORNALIERO (alle 21:00 o successive)
+    if now_rome.hour >= 21 and last_daily_date != today_str and daily_stats:
         print("[*] Generazione del Report Giornaliero...")
         
+        # Accumula i dati odierni nel mese corrente
+        for item in daily_stats:
+            sn = item["sn"]
+            if sn not in state["monthly"][month_key]:
+                state["monthly"][month_key][sn] = {
+                    "label": item["label"],
+                    "production": 0.0,
+                    "to_grid": 0.0,
+                    "to_user": 0.0,
+                    "charge": 0.0,
+                    "discharge": 0.0,
+                    "days": []
+                }
+            m_entry = state["monthly"][month_key][sn]
+            m_entry["label"] = item["label"]
+            if today_str not in m_entry["days"]:
+                m_entry["days"].append(today_str)
+                m_entry["production"] = round(m_entry["production"] + item["e_today"], 2)
+                m_entry["to_grid"] = round(m_entry["to_grid"] + item["e_to_grid"], 2)
+                m_entry["to_user"] = round(m_entry["to_user"] + item["e_to_user"], 2)
+                m_entry["charge"] = round(m_entry["charge"] + item.get("e_charge", 0.0), 2)
+                m_entry["discharge"] = round(m_entry["discharge"] + item.get("e_discharge", 0.0), 2)
+
         tot_production = sum(item["e_today"] for item in daily_stats)
         tot_grid = sum(item["e_to_grid"] for item in daily_stats)
         tot_user = sum(item["e_to_user"] for item in daily_stats)
@@ -342,7 +419,6 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
             msg += f"🏠 Autoconsumo: <b>{user:.2f} kWh</b> ({pct_user}%)\n"
             msg += f"🔌 Immessa in Rete: <b>{grid:.2f} kWh</b> ({pct_grid}%)\n"
 
-            # Gestione Batteria nel Report (con fallback sull'ultimo valore noto se Offline)
             soc_val = item.get("soc")
             is_offline = item.get("is_offline", False)
             last_soc = item.get("last_known_soc")
@@ -376,6 +452,15 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
         state["last_daily_report_date"] = today_str
         print("[+] Report Giornaliero inviato!")
 
+        # 2. REPORT MENSILE (Inviato l'ultimo giorno del mese alle 21:00)
+        last_day_of_month = calendar.monthrange(now_rome.year, now_rome.month)[1]
+        if now_rome.day == last_day_of_month and last_monthly_date != month_key:
+            print("[*] Generazione del Report Mensile...")
+            monthly_msg = format_monthly_report(now_rome, month_key, state["monthly"][month_key])
+            send_telegram(monthly_msg)
+            state["last_monthly_report_date"] = month_key
+            print("[+] Report Mensile inviato con successo!")
+
 def main():
     now_rome = datetime.now(TZ_ROME)
     print(f"Avvio monitoraggio Growatt (Ora Italiana: {now_rome.strftime('%Y-%m-%d %H:%M:%S')})")
@@ -387,7 +472,7 @@ def main():
     for acc in ACCOUNTS:
         check_account(acc, is_daytime, state, daily_stats)
 
-    handle_daily_report(now_rome, daily_stats, state)
+    handle_reports(now_rome, daily_stats, state)
 
     save_state(state)
     print("\n[+] Controllo completato con successo.")
