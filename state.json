@@ -15,5 +15,7 @@
   "last_daily_report_date": "2026-09-03",
   "monthly": {
     "2026-09": {}
-  }
+  },
+  "mismatch_count": 0,
+  "last_telegram_update_id": 499964515
 }
