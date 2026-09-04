@@ -183,7 +183,10 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
 
                 p_grid_w = round(safe_float(sys_status.get("pactogrid")) * 1000.0, 1)
                 p_load_w = round(safe_float(sys_status.get("pLocalLoad")) * 1000.0, 1)
-                soc = safe_float(sys_status.get("SOC") or dev.get("capacity"))
+                
+                # Lettura percentuale Batteria
+                soc_raw = sys_status.get("SOC") or dev.get("capacity")
+                soc = safe_float(soc_raw) if soc_raw is not None else None
                 v_bat = safe_float(sys_status.get("vBat"))
 
                 inv_status = str(sys_status.get("status") or dev.get("deviceStatus") or "").strip()
@@ -191,7 +194,7 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 fault_code = sys_status.get("proPto") or dev.get("proPto") or 0
 
                 # Dati energetici odierni in kWh
-                e_today = safe_float(totals.get("epvToday") or plant.get("todayEnergy"))
+                e_today = safe_float(totals.get("epvToday") or plant.get("todayEnergy") or dev.get("eToday"))
                 e_to_grid = safe_float(totals.get("etoGridToday"))
                 e_to_user = safe_float(totals.get("elocalLoadToday"))
                 e_charge = safe_float(totals.get("echargetoday") or dev.get("eChargeToday"))
@@ -200,12 +203,28 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 if e_to_user == 0.0 and e_today > 0 and e_today >= e_to_grid:
                     e_to_user = round(e_today - e_to_grid, 2)
 
+                # Verifica Offline reale
+                has_telemetry = bool(sys_status and (solar_w > 0 or p_load_w > 0 or p_grid_w > 0 or inv_status in ["1", "5", "normal"]))
+                is_offline = lost_from_list and not has_telemetry
+
+                # Gestione memoria di stato
+                if sn not in state:
+                    state[sn] = {}
+                
+                # Se la lettura della batteria è valida, aggiorniamo l'ultimo valore noto in memoria
+                if soc is not None and soc > 0:
+                    state[sn]["last_known_soc"] = soc
+
+                # Raccolta statistiche per il Report serale
                 daily_stats.append({
+                    "sn": sn,
                     "label": display_name,
                     "e_today": e_today,
                     "e_to_grid": e_to_grid,
                     "e_to_user": e_to_user,
                     "soc": soc,
+                    "is_offline": is_offline,
+                    "last_known_soc": state[sn].get("last_known_soc"),
                     "e_charge": e_charge,
                     "e_discharge": e_discharge
                 })
@@ -215,10 +234,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 print(f"    - Rete: {p_grid_w} W | Casa: {p_load_w} W | Batteria: {soc}% ({v_bat}V)")
                 print(f"    - Energia Oggi: {e_today} kWh (Rete: {e_to_grid} kWh, Casa: {e_to_user} kWh)")
                 print(f"    - Stato: '{inv_status}' ({status_desc}) | Guasto: {fault_code} | Lost: {lost_from_list}")
-
-                # Verifica Offline reale
-                has_telemetry = (sys_status and (solar_w > 0 or p_load_w > 0 or p_grid_w > 0 or inv_status in ["1", "5", "normal"]))
-                is_offline = lost_from_list and not has_telemetry
 
                 inverter_state = state.get(sn, {})
                 was_in_error = inverter_state.get("in_error", False)
@@ -246,13 +261,13 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
 
                 if current_error_type:
                     if not was_in_error:
-                        state[sn] = {
+                        state[sn].update({
                             "in_error": True,
                             "error_type": current_error_type,
                             "start_ts": now_ts,
                             "display_name": display_name,
                             "zero_count": zero_count
-                        }
+                        })
                         start_time_str = get_italian_time_str(now_ts)
                         send_telegram(
                             f"🚨 <b>ALLARME: {current_error_type}</b>\n\n"
@@ -267,11 +282,14 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                         print(f"[-] {display_name} ancora in anomalia ({current_error_type}) da {dur_str}.")
                 else:
                     if was_in_error:
+                        # INVIO NOTIFICA DI RIPRISTINO (con Batteria inclusa)
                         start_ts = inverter_state.get("start_ts", now_ts)
                         duration_str = format_duration(now_ts - start_ts)
                         start_time_str = get_italian_time_str(start_ts)
                         end_time_str = get_italian_time_str(now_ts)
                         prev_err = inverter_state.get("error_type", "OFFLINE/ANOMALIA")
+
+                        battery_str = f"\n🔋 Batteria: <b>{soc:.0f}%</b>" if soc is not None and soc > 0 else ""
 
                         print(f"[+] Invio ripristino per {display_name} (durata: {duration_str})")
                         send_telegram(
@@ -281,16 +299,15 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                             f"🟢 Lo stato di <b>{prev_err}</b> è rientrato!\n"
                             f"⏱️ <b>Durata anomalia:</b> {duration_str} (dalle {start_time_str} alle {end_time_str})\n"
                             f"⚡ Potenza Solare Attuale: <b>{solar_w} W</b>"
+                            f"{battery_str}"
                         )
 
-                        state[sn] = {
+                        state[sn].update({
                             "in_error": False,
                             "last_resolved": now_ts,
                             "zero_count": 0
-                        }
+                        })
                     else:
-                        if sn not in state:
-                            state[sn] = {}
                         state[sn]["zero_count"] = zero_count
                         state[sn]["in_error"] = False
 
@@ -325,11 +342,24 @@ def handle_daily_report(now_rome: datetime, daily_stats: list, state: dict):
             msg += f"🏠 Autoconsumo: <b>{user:.2f} kWh</b> ({pct_user}%)\n"
             msg += f"🔌 Immessa in Rete: <b>{grid:.2f} kWh</b> ({pct_grid}%)\n"
 
-            if item.get("soc") is not None:
-                msg += f"🔋 Batteria: <b>{item['soc']:.0f}%</b>"
+            # Gestione Batteria nel Report (con fallback sull'ultimo valore noto se Offline)
+            soc_val = item.get("soc")
+            is_offline = item.get("is_offline", False)
+            last_soc = item.get("last_known_soc")
+
+            if is_offline:
+                if last_soc is not None:
+                    msg += f"🔋 Batteria: <b>{last_soc:.0f}%</b> <i>(ultimo valore noto - Offline)</i>\n"
+                else:
+                    msg += f"🔋 Batteria: <i>(Disconnesso)</i>\n"
+            elif soc_val is not None and soc_val > 0:
+                msg += f"🔋 Batteria: <b>{soc_val:.0f}%</b>"
                 if item.get("e_charge", 0) > 0 or item.get("e_discharge", 0) > 0:
                     msg += f" (Carica: {item['e_charge']:.1f} kWh | Scarica: {item['e_discharge']:.1f} kWh)"
                 msg += "\n"
+            elif last_soc is not None:
+                msg += f"🔋 Batteria: <b>{last_soc:.0f}%</b> <i>(ultimo valore noto)</i>\n"
+
             msg += "\n"
 
         if len(daily_stats) > 1:
