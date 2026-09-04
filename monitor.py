@@ -26,6 +26,14 @@ ACCOUNTS = [
     }
 ]
 
+# Parametri Economici di Default (modificabili liberamente)
+PRICE_KWH_SAVED = float(os.getenv("PRICE_KWH_SAVED", "0.25"))  # Risparmio in bolletta (€/kWh autoconsumato)
+PRICE_KWH_GRID = float(os.getenv("PRICE_KWH_GRID", "0.10"))    # Rimborso GSE / Ritiro Dedicato (€/kWh immesso)
+
+# Coordinate geografiche indicative per il meteo (Nord/Centro Italia)
+LATITUDE = float(os.getenv("LATITUDE", "45.46"))
+LONGITUDE = float(os.getenv("LONGITUDE", "9.19"))
+
 STATE_FILE = "state.json"
 TZ_ROME = ZoneInfo("Europe/Rome")
 
@@ -59,7 +67,7 @@ def save_state(state: dict):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
-        print(f"[+] Stato salvato correttamente in {STATE_FILE}.")
+        print(f"[+] Stato salvato in {STATE_FILE}.")
     except Exception as e:
         print(f"[-] Errore salvataggio {STATE_FILE}: {e}")
 
@@ -86,14 +94,15 @@ def safe_float(val, default=0.0) -> float:
     except (ValueError, TypeError):
         return default
 
-def send_telegram(message: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+def send_telegram(message: str, chat_id: str = None):
+    target_chat = chat_id or TELEGRAM_CHAT_ID
+    if not TELEGRAM_TOKEN or not target_chat:
         print("[-] ERRORE: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID mancanti.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": target_chat,
         "text": message,
         "parse_mode": "HTML"
     }
@@ -112,7 +121,51 @@ def create_growatt_session():
     api.session.headers.update(CUSTOM_HEADERS)
     return api
 
-def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats: list):
+def get_solar_forecast():
+    """Recupera la previsione solare e meteo per domani da Open-Meteo"""
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={LATITUDE}&longitude={LONGITUDE}&daily=weathercode,temperature_2m_max,sunshine_duration"
+            f"&timezone=Europe%2FRome&forecast_days=2"
+        )
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        daily = data.get("daily", {})
+
+        wcode = daily.get("weathercode", [0, 0])[1]
+        t_max = daily.get("temperature_2m_max", [0, 0])[1]
+        sun_sec = daily.get("sunshine_duration", [0, 0])[1]
+        sun_hours = round(sun_sec / 3600, 1)
+
+        if wcode == 0:
+            desc = "☀️ Sereno"
+            estimate = "Ottima (~28-34 kWh)"
+        elif wcode in [1, 2]:
+            desc = "🌤️ Poco nuvoloso"
+            estimate = "Buona (~22-28 kWh)"
+        elif wcode == 3:
+            desc = "☁️ Coperto / Nuvoloso"
+            estimate = "Media (~14-20 kWh)"
+        elif wcode in [51, 53, 55, 61, 63, 65, 80, 81, 82]:
+            desc = "🌧️ Pioggia"
+            estimate = "Bassa (~6-12 kWh)"
+        elif wcode in [71, 73, 75, 85, 86]:
+            desc = "🌨️ Neve"
+            estimate = "Minima (~3-8 kWh)"
+        elif wcode in [95, 96, 99]:
+            desc = "⛈️ Temporali"
+            estimate = "Variabile/Bassa (~8-15 kWh)"
+        else:
+            desc = "⛅ Variabile"
+            estimate = "Media (~18-24 kWh)"
+
+        return f"{desc} (~{sun_hours}h di sole, max {t_max}°C) | Stima: <b>{estimate}</b>"
+    except Exception as e:
+        print(f"[-] Errore previsioni meteo: {e}")
+        return ""
+
+def check_account(account_info: dict, is_daytime: bool, state: dict, live_data: list, daily_stats: list):
     label = account_info["label"]
     user = (account_info["user"] or "").strip()
     password = (account_info["pass"] or "").strip()
@@ -215,18 +268,24 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
                 if soc is not None and soc > 0:
                     state[sn]["last_known_soc"] = soc
 
-                daily_stats.append({
+                live_item = {
                     "sn": sn,
                     "label": display_name,
+                    "solar_w": solar_w,
+                    "p_grid_w": p_grid_w,
+                    "p_load_w": p_load_w,
+                    "soc": soc,
+                    "v_bat": v_bat,
                     "e_today": e_today,
                     "e_to_grid": e_to_grid,
                     "e_to_user": e_to_user,
-                    "soc": soc,
-                    "is_offline": is_offline,
-                    "last_known_soc": state[sn].get("last_known_soc"),
                     "e_charge": e_charge,
-                    "e_discharge": e_discharge
-                })
+                    "e_discharge": e_discharge,
+                    "is_offline": is_offline,
+                    "last_known_soc": state[sn].get("last_known_soc")
+                }
+                live_data.append(live_item)
+                daily_stats.append(live_item)
 
                 print(f"[+] {display_name}:")
                 print(f"    - Solare: {solar_w} W (P1: {round(p_pv1_kw*1000)}W, P2: {round(p_pv2_kw*1000)}W)")
@@ -313,6 +372,47 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, daily_stats
             print(f"[-] Errore lettura {plant_name}: {e}")
             traceback.print_exc()
 
+def check_mismatch(live_data: list, is_daytime: bool, state: dict):
+    """Controlla se c'è un forte sbilanciamento di produzione tra i due impianti (possibile guasto stringa)"""
+    if not is_daytime or len(live_data) < 2:
+        state["mismatch_count"] = 0
+        return
+
+    inv1 = live_data[0]
+    inv2 = live_data[1]
+
+    if inv1.get("is_offline") or inv2.get("is_offline"):
+        state["mismatch_count"] = 0
+        return
+
+    w1 = inv1.get("solar_w", 0.0)
+    w2 = inv2.get("solar_w", 0.0)
+    max_w = max(w1, w2)
+
+    if max_w >= 1500.0:
+        diff_w = abs(w1 - w2)
+        diff_pct = (diff_w / max_w) * 100.0
+
+        if diff_pct >= 50.0:
+            mismatch_count = state.get("mismatch_count", 0) + 1
+            state["mismatch_count"] = mismatch_count
+            print(f"[*] Sbilanciamento rilevato: {diff_pct:.1f}% (Ciclo {mismatch_count}/3)")
+
+            if mismatch_count == 3:
+                lower_inv = inv2 if w2 < w1 else inv1
+                higher_inv = inv1 if w2 < w1 else inv2
+                send_telegram(
+                    f"⚠️ <b>AVVISO SBILANCIAMENTO IMPIANTI</b>\n\n"
+                    f"📍 {higher_inv['label']}: <b>{higher_inv['solar_w']} W</b>\n"
+                    f"📍 {lower_inv['label']}: <b>{lower_inv['solar_w']} W</b> (<code>-{diff_pct:.0f}%</code>)\n\n"
+                    f"⚠️ <b>{lower_inv['label']}</b> sta producendo molto meno da oltre 30 minuti.\n"
+                    f"🔍 <i>Possibile stringa staccata, sezionatore scattato o forte ombreggiamento anomalo.</i>"
+                )
+        else:
+            state["mismatch_count"] = 0
+    else:
+        state["mismatch_count"] = 0
+
 def format_monthly_report(now_rome: datetime, month_key: str, month_data: dict) -> str:
     month_num = int(month_key.split("-")[1])
     year_num = int(month_key.split("-")[0])
@@ -323,7 +423,7 @@ def format_monthly_report(now_rome: datetime, month_key: str, month_data: dict) 
     tot_user = 0.0
 
     msg = f"🏆 <b>REPORT MENSILE FOTOVOLTAICO - {month_name.upper()} {year_num}</b>\n"
-    msg += f"📅 <i>Riepilogo energetico del mese</i>\n\n"
+    msg += f"📅 <i>Riepilogo energetico ed economico</i>\n\n"
 
     for sn, d in month_data.items():
         label = d.get("label", sn)
@@ -337,27 +437,36 @@ def format_monthly_report(now_rome: datetime, month_key: str, month_data: dict) 
         pct_user = round((user / prod * 100), 1) if prod > 0 else 0
         pct_grid = round((grid / prod * 100), 1) if prod > 0 else 0
 
+        val_saved = user * PRICE_KWH_SAVED
+        val_grid = grid * PRICE_KWH_GRID
+        val_tot = val_saved + val_grid
+
         tot_prod += prod
         tot_grid += grid
         tot_user += user
 
         msg += f"📍 <b>{label}</b>\n"
-        msg += f"☀️ Produzione Mese: <b>{prod:.2f} kWh</b> (Media: {avg_daily:.1f} kWh/giorno)\n"
+        msg += f"☀️ Produzione Mese: <b>{prod:.2f} kWh</b> (Media: {avg_daily:.1f} kWh/gg)\n"
         msg += f"🏠 Autoconsumo: <b>{user:.2f} kWh</b> ({pct_user}%)\n"
         msg += f"🔌 Immessa in Rete: <b>{grid:.2f} kWh</b> ({pct_grid}%)\n"
         if charge > 0:
             msg += f"🔋 Batteria: <b>{charge:.1f} kWh</b> accumulati\n"
-        msg += "\n"
+        msg += f"💰 Valore Economico: <b>~{val_tot:.2f} €</b> (Risparmio: {val_saved:.2f}€ | GSE: {val_grid:.2f}€)\n\n"
 
     if len(month_data) > 1:
         tot_pct_user = round((tot_user / tot_prod * 100), 1) if tot_prod > 0 else 0
         tot_pct_grid = round((tot_grid / tot_prod * 100), 1) if tot_prod > 0 else 0
+        tot_val_saved = tot_user * PRICE_KWH_SAVED
+        tot_val_grid = tot_grid * PRICE_KWH_GRID
+        tot_val = tot_val_saved + tot_val_grid
 
         msg += "━━━━━━━━━━━━━━━━━━━━\n"
         msg += "🌟 <b>TOTALE MENSILE COMPLESSIVO</b>\n"
         msg += f"☀️ Produzione Totale: <b>{tot_prod:.2f} kWh</b>\n"
         msg += f"🏠 Autoconsumo Totale: <b>{tot_user:.2f} kWh</b> ({tot_pct_user}%)\n"
         msg += f"🔌 Immissione Totale: <b>{tot_grid:.2f} kWh</b> ({tot_pct_grid}%)\n"
+        msg += f"💶 <b>VALORE TOTALE GENERATO: ~{tot_val:.2f} €</b>\n"
+        msg += f"   <i>(Risparmio in bolletta: ~{tot_val_saved:.2f} € | Rimborso GSE: ~{tot_val_grid:.2f} €)</i>\n"
 
     return msg
 
@@ -376,7 +485,6 @@ def handle_reports(now_rome: datetime, daily_stats: list, state: dict):
     if now_rome.hour >= 21 and last_daily_date != today_str and daily_stats:
         print("[*] Generazione del Report Giornaliero...")
         
-        # Accumula i dati odierni nel mese corrente
         for item in daily_stats:
             sn = item["sn"]
             if sn not in state["monthly"][month_key]:
@@ -402,6 +510,10 @@ def handle_reports(now_rome: datetime, daily_stats: list, state: dict):
         tot_production = sum(item["e_today"] for item in daily_stats)
         tot_grid = sum(item["e_to_grid"] for item in daily_stats)
         tot_user = sum(item["e_to_user"] for item in daily_stats)
+
+        tot_val_saved = tot_user * PRICE_KWH_SAVED
+        tot_val_grid = tot_grid * PRICE_KWH_GRID
+        tot_val_day = tot_val_saved + tot_val_grid
 
         date_formatted = now_rome.strftime("%d/%m/%Y")
         msg = f"📊 <b>REPORT GIORNALIERO FOTOVOLTAICO</b>\n📅 <i>{date_formatted}</i>\n\n"
@@ -447,6 +559,12 @@ def handle_reports(now_rome: datetime, daily_stats: list, state: dict):
             msg += f"☀️ Produzione Totale: <b>{tot_production:.2f} kWh</b>\n"
             msg += f"🏠 Autoconsumo Totale: <b>{tot_user:.2f} kWh</b> ({tot_pct_user}%)\n"
             msg += f"🔌 Immissione Totale: <b>{tot_grid:.2f} kWh</b> ({tot_pct_grid}%)\n"
+            msg += f"💶 <b>Valore Economico Oggi: ~{tot_val_day:.2f} €</b>\n"
+            msg += f"   <i>(Risparmio bolletta: ~{tot_val_saved:.2f} € | Rimborso GSE: ~{tot_val_grid:.2f} €)</i>\n\n"
+
+        forecast_str = get_solar_forecast()
+        if forecast_str:
+            msg += f"🌤️ <b>Previsione Solare Domani:</b>\n{forecast_str}\n"
 
         send_telegram(msg)
         state["last_daily_report_date"] = today_str
@@ -461,18 +579,130 @@ def handle_reports(now_rome: datetime, daily_stats: list, state: dict):
             state["last_monthly_report_date"] = month_key
             print("[+] Report Mensile inviato con successo!")
 
+def handle_telegram_commands(live_data: list, state: dict):
+    """Gestisce i comandi interattivi inviati dall'utente al Bot Telegram"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    last_update_id = state.get("last_telegram_update_id", 0)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=3"
+
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return
+        updates = res.json().get("result", [])
+        if not updates:
+            return
+
+        for update in updates:
+            up_id = update.get("update_id", 0)
+            if up_id > last_update_id:
+                state["last_telegram_update_id"] = up_id
+
+            msg_obj = update.get("message", {})
+            chat_id = str(msg_obj.get("chat", {}).get("id", ""))
+            text = str(msg_obj.get("text", "")).strip().lower()
+
+            if chat_id != str(TELEGRAM_CHAT_ID):
+                continue
+
+            print(f"[+] Ricevuto comando Telegram: '{text}' da chat {chat_id}")
+
+            if text.startswith("/status") or text.startswith("/ora") or text.startswith("/live"):
+                tot_w = sum(x.get("solar_w", 0) for x in live_data)
+                tot_grid = sum(x.get("p_grid_w", 0) for x in live_data)
+                tot_load = sum(x.get("p_load_w", 0) for x in live_data)
+                
+                resp = f"⚡ <b>STATO IN TEMPO REALE</b> ({get_italian_time_str()})\n\n"
+                for item in live_data:
+                    resp += f"📍 <b>{item['label']}</b>\n"
+                    if item.get("is_offline"):
+                        resp += "🔴 <i>Inverter OFFLINE</i>\n\n"
+                    else:
+                        resp += f"☀️ Solare: <b>{item['solar_w']} W</b>\n"
+                        resp += f"🏠 Casa: <b>{item['p_load_w']} W</b> | 🔌 Rete: <b>{item['p_grid_w']} W</b>\n"
+                        soc = item.get("soc")
+                        if soc is not None:
+                            resp += f"🔋 Batteria: <b>{soc:.0f}%</b> ({item.get('v_bat')}V)\n"
+                        resp += "\n"
+
+                if len(live_data) > 1:
+                    resp += "━━━━━━━━━━━━━━━━━━━━\n"
+                    resp += f"☀️ <b>Produzione Totale: {tot_w:.0f} W</b>\n"
+                    resp += f"🏠 Consumo Casa: {tot_load:.0f} W | 🔌 Immessa: {tot_grid:.0f} W\n"
+                send_telegram(resp, chat_id)
+
+            elif text.startswith("/batteria") or text.startswith("/batt"):
+                resp = f"🔋 <b>STATO BATTERIE</b> ({get_italian_time_str()})\n\n"
+                for item in live_data:
+                    resp += f"📍 <b>{item['label']}</b>\n"
+                    soc = item.get("soc")
+                    last_soc = item.get("last_known_soc")
+                    if soc is not None and not item.get("is_offline"):
+                        resp += f"🔋 Carica Attuale: <b>{soc:.0f}%</b>\n"
+                        resp += f"⚡ Tensione: <b>{item.get('v_bat')} V</b>\n"
+                        resp += f"📥 Caricata oggi: <b>{item.get('e_charge', 0):.1f} kWh</b>\n"
+                        resp += f"📤 Scaricata oggi: <b>{item.get('e_discharge', 0):.1f} kWh</b>\n\n"
+                    elif last_soc is not None:
+                        resp += f"🔋 Carica: <b>{last_soc:.0f}%</b> <i>(ultimo valore noto - Offline)</i>\n\n"
+                    else:
+                        resp += "🔴 <i>Dato non disponibile (Offline)</i>\n\n"
+                send_telegram(resp, chat_id)
+
+            elif text.startswith("/oggi") or text.startswith("/report"):
+                tot_prod = sum(x.get("e_today", 0) for x in live_data)
+                tot_grid = sum(x.get("e_to_grid", 0) for x in live_data)
+                tot_user = sum(x.get("e_to_user", 0) for x in live_data)
+                val_day = (tot_user * PRICE_KWH_SAVED) + (tot_grid * PRICE_KWH_GRID)
+
+                resp = f"📊 <b>REPORT PARZIALE DI OGGI</b> ({get_italian_time_str()})\n\n"
+                for item in live_data:
+                    resp += f"📍 <b>{item['label']}</b>\n"
+                    resp += f"☀️ Prodotto: <b>{item.get('e_today', 0):.2f} kWh</b>\n"
+                    resp += f"🏠 Autoconsumo: <b>{item.get('e_to_user', 0):.2f} kWh</b>\n"
+                    resp += f"🔌 In Rete: <b>{item.get('e_to_grid', 0):.2f} kWh</b>\n\n"
+
+                if len(live_data) > 1:
+                    resp += "━━━━━━━━━━━━━━━━━━━━\n"
+                    resp += f"☀️ <b>Totale Prodotto: {tot_prod:.2f} kWh</b>\n"
+                    resp += f"🏠 Autoconsumo: {tot_user:.2f} kWh | 🔌 In Rete: {tot_grid:.2f} kWh\n"
+                    resp += f"💶 <b>Valore generato finora: ~{val_day:.2f} €</b>\n"
+                send_telegram(resp, chat_id)
+
+            elif text.startswith("/help") or text.startswith("/start"):
+                help_msg = (
+                    "🤖 <b>COMANDI DISPONIBILI DEL BOT</b>\n\n"
+                    "⚡ <b>/status</b> - Potenza in tempo reale, consumi e rete\n"
+                    "📊 <b>/oggi</b> - Produzione parziale e valore economico odierno\n"
+                    "🔋 <b>/batteria</b> - Percentuale e salute accumulatori\n"
+                    "ℹ️ <b>/help</b> - Mostra questo messaggio di aiuto"
+                )
+                send_telegram(help_msg, chat_id)
+
+    except Exception as e:
+        print(f"[-] Errore gestione comandi Telegram: {e}")
+
 def main():
     now_rome = datetime.now(TZ_ROME)
     print(f"Avvio monitoraggio Growatt (Ora Italiana: {now_rome.strftime('%Y-%m-%d %H:%M:%S')})")
     is_daytime = 9 <= now_rome.hour < 18
 
     state = load_state()
+    live_data = []
     daily_stats = []
 
     for acc in ACCOUNTS:
-        check_account(acc, is_daytime, state, daily_stats)
+        check_account(acc, is_daytime, state, live_data, daily_stats)
 
+    # 1. Controllo anomalie sbilanciamento tra i 2 impianti
+    check_mismatch(live_data, is_daytime, state)
+
+    # 2. Controllo e invio Report Giornaliero e Mensile
     handle_reports(now_rome, daily_stats, state)
+
+    # 3. Gestione eventuali comandi interattivi ricevuti su Telegram
+    handle_telegram_commands(live_data, state)
 
     save_state(state)
     print("\n[+] Controllo completato con successo.")
