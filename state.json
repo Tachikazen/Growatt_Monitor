@@ -2,7 +2,8 @@
   "QCM0DA70C6": {
     "in_error": false,
     "last_resolved": 1788450634.0298471,
-    "zero_count": 0
+    "zero_count": 0,
+    "last_known_soc": 69.0
   },
   "QCM0DA70BL": {
     "in_error": true,
