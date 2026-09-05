@@ -3,7 +3,7 @@
     "in_error": false,
     "last_resolved": 1788450634.0298471,
     "zero_count": 0,
-    "last_known_soc": 76.0
+    "last_known_soc": 78.0
   },
   "QCM0DA70BL": {
     "in_error": false,
@@ -41,6 +41,6 @@
       }
     }
   },
-  "mismatch_count": 2,
+  "mismatch_count": 3,
   "last_telegram_update_id": 499964515
 }
