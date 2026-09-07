@@ -3,7 +3,7 @@
     "in_error": false,
     "last_resolved": 1788450634.0298471,
     "zero_count": 0,
-    "last_known_soc": 93.0
+    "last_known_soc": 92.0
   },
   "QCM0DA70BL": {
     "in_error": true,
@@ -14,33 +14,35 @@
     "last_known_soc": 70.0,
     "last_resolved": 1788799239.3580837
   },
-  "last_daily_report_date": "2026-09-06",
+  "last_daily_report_date": "2026-09-07",
   "monthly": {
     "2026-09": {
       "QCM0DA70C6": {
         "label": "Impianto 1 (TONELLO DARIO) - QCM0DA70C6",
-        "production": 97.5,
-        "to_grid": 43.5,
-        "to_user": 45.6,
-        "charge": 22.9,
-        "discharge": 14.3,
+        "production": 129.3,
+        "to_grid": 57.7,
+        "to_user": 60.3,
+        "charge": 30.0,
+        "discharge": 18.4,
         "days": [
           "2026-09-04",
           "2026-09-05",
-          "2026-09-06"
+          "2026-09-06",
+          "2026-09-07"
         ]
       },
       "QCM0DA70BL": {
         "label": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
-        "production": 81.6,
+        "production": 84.5,
         "to_grid": 43.0,
-        "to_user": 30.8,
-        "charge": 19.4,
-        "discharge": 11.9,
+        "to_user": 35.9,
+        "charge": 21.3,
+        "discharge": 15.7,
         "days": [
           "2026-09-04",
           "2026-09-05",
-          "2026-09-06"
+          "2026-09-06",
+          "2026-09-07"
         ]
       }
     }
