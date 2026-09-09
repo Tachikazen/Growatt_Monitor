@@ -6,9 +6,9 @@
     "last_known_soc": 77.0
   },
   "QCM0DA70BL": {
-    "in_error": false,
+    "in_error": true,
     "error_type": "OFFLINE",
-    "start_ts": 1788918641.1298208,
+    "start_ts": 1788928875.0134542,
     "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
     "zero_count": 0,
     "last_known_soc": 75.0,
