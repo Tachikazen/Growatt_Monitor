@@ -10,7 +10,7 @@
     "error_type": "PRODUZIONE_ZERO",
     "start_ts": 1789197637.9505026,
     "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
-    "zero_count": 53,
+    "zero_count": 54,
     "last_known_soc": 96.0,
     "last_resolved": 1789142474.453436
   },
@@ -55,6 +55,6 @@
       }
     }
   },
-  "mismatch_count": 46,
+  "mismatch_count": 47,
   "last_telegram_update_id": 499964515
 }
