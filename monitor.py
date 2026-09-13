@@ -318,6 +318,8 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, live_data: 
                     "e_to_user": e_to_user,
                     "e_charge": e_charge,
                     "e_discharge": e_discharge,
+                    "fault_code": fault_code,
+                    "inv_status": inv_status,
                     "is_offline": is_offline,
                     "last_known_soc": state[sn].get("last_known_soc")
                 }
@@ -619,15 +621,23 @@ def handle_telegram_commands(live_data: list, state: dict):
                 resp = f"⚡ <b>STATO IN TEMPO REALE</b> ({get_italian_time_str()})\n\n"
                 for item in live_data:
                     resp += f"📍 <b>{item['label']}</b>\n"
+                    fault_code = item.get("fault_code", 0)
                     if item.get("is_offline"):
-                        resp += "🔴 <i>Inverter OFFLINE</i>\n\n"
+                        resp += "🔴 <b>Stato:</b> <i>OFFLINE (Disconnesso)</i>\n"
+                    elif fault_code not in [0, "0", None, "", "00"]:
+                        fault_name, fault_detail = get_fault_description(fault_code)
+                        resp += f"⚠️ <b>ALLARME GUASTO: {fault_name} (Codice {fault_code})</b>\n"
+                        resp += f"   🛑 <i>{fault_detail}</i>\n"
                     else:
+                        resp += "🟢 <b>Stato:</b> <i>Operativo</i>\n"
+
+                    if not item.get("is_offline"):
                         resp += f"☀️ Solare: <b>{item['solar_w']} W</b>\n"
                         resp += f"🏠 Casa: <b>{item['p_load_w']} W</b> | 🔌 Rete: <b>{item['p_grid_w']} W</b>\n"
                         soc = item.get("soc")
                         if soc is not None:
                             resp += f"🔋 Batteria: <b>{soc:.0f}%</b> ({item.get('v_bat')}V)\n"
-                        resp += "\n"
+                    resp += "\n"
 
                 if len(live_data) > 1:
                     resp += "━━━━━━━━━━━━━━━━━━━━\n"

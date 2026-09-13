@@ -35,6 +35,32 @@ CUSTOM_HEADERS = {
     "X-Requested-With": "XMLHttpRequest"
 }
 
+# Dizionario Ufficiale Codici Errore e Guasti Growatt SPH / MIN / MIC
+GROWATT_FAULT_CODES = {
+    201: ("Corrente di Dispersione Elevata (Leakage Current High)", "Rilevata corrente di fuga verso terra superiore alla norma."),
+    202: ("Guasto Sensore Corrente (Sensor Fault)", "Anomalia nel sensore di lettura corrente interna."),
+    203: ("Sovracorrente Transitoria (Transient Overcurrent)", "Picco improvviso di corrente AC/DC oltre i limiti di sicurezza."),
+    300: ("Tensione Rete Enel Fuori Limite (AC V Outrange)", "La rete elettrica Enel ha superato la soglia di voltaggio massima o minima consentita."),
+    302: ("Frequenza Rete Enel Fuori Limite (AC F Outrange)", "La frequenza della rete Enel è instabile (diversa da 50 Hz)."),
+    303: ("Sovraccarico Uscita EPS (EPS Overload)", "I carichi collegati all'uscita di emergenza/backup superano la potenza massima."),
+    304: ("Errore Comunicazione BMS Batteria (BMS Open)", "Interrotta la linea di comunicazione dati CAN/RS485 tra inverter e batteria."),
+    401: ("Blocco Comunicazione Interna (DSP/COM Fault)", "Mancata risposta della scheda di controllo/porta di comunicazione interna."),
+    402: ("Sovratensione Bus DC (Bus Voltage High)", "Tensione del bus DC interno oltre la soglia di sicurezza."),
+    403: ("Tensione Batteria Bassa (Bat Voltage Low)", "La batteria è scesa al di sotto della tensione minima operativa."),
+    404: ("Guasto Relè di Rete (Grid Relay Fault)", "I relè di connessione alla rete elettrica non commutano correttamente."),
+    405: ("Guasto Relè Interno (Relay Fault)", "Anomalia nei relè di scambio interni all'inverter."),
+    406: ("Auto-Test Fallito (Auto Test Fault)", "Il controllo automatico di sicurezza iniziale non è andato a buon fine."),
+    407: ("Guasto Sensore HCT (HCT Fault)", "Anomalia nel sensore di corrente ad effetto Hall."),
+    408: ("Sovratemperatura Interna (Temp Over)", "Temperatura interna dell'inverter troppo elevata. Verificare ventilazione e dissipatore."),
+    409: ("Basso Isolamento PV (PV Isolation Low)", "Dispersione verso terra delle stringhe fotovoltaiche (frequente con pioggia o umidità elevata)."),
+    410: ("Sovratemperatura Induttanza (Inductor Temp Over)", "Surriscaldamento degli induttori interni di potenza."),
+    411: ("Sovratensione Stringa PV (PV Voltage High)", "La tensione a vuoto (Voc) dei pannelli solari ha superato il limite massimo dell'inverter."),
+    417: ("Guasto DSP Principale (DSP Fault)", "Anomalia nel microprocessore di calcolo principale DSP."),
+    418: ("Versione DSP non Compatibile (DSP Version Error)", "Incongruenza tra le versioni firmware DSP e HMI."),
+    420: ("Guasto Sensore NTC (NTC Fault)", "Sensore di rilevamento temperatura interno interrotto o in corto."),
+    425: ("Batteria Sottotensione Critica (Bat Under Voltage)", "La batteria ha raggiunto una scarica profonda e richiede ricarica di soccorso.")
+}
+
 def safe_float(val, default=0.0) -> float:
     try:
         if val is None:
@@ -42,6 +68,17 @@ def safe_float(val, default=0.0) -> float:
         return float(str(val).replace("W", "").replace("kW", "").replace("%", "").strip())
     except Exception:
         return default
+
+def get_fault_description(fault_code) -> tuple:
+    """Restituisce (Nome errore, Spiegazione dettagliata)"""
+    try:
+        code_int = int(fault_code)
+    except (ValueError, TypeError):
+        code_int = -1
+
+    if code_int in GROWATT_FAULT_CODES:
+        return GROWATT_FAULT_CODES[code_int]
+    return (f"Codice Guasto: {fault_code}", "Anomalia rilevata dall'inverter. Consultare il manuale tecnico Growatt.")
 
 def get_live_data():
     results = []
@@ -90,7 +127,8 @@ def get_live_data():
                     alias = dev.get("deviceAilas") or dev.get("deviceAlias") or sn
                     display_name = f"{label} ({plant_name}) - {alias}"
 
-                    is_lost = bool(dev.get("lost") is True or str(dev.get("lost")).lower() == "true")
+                    is_lost_dev = dev.get("lost")
+                    lost_from_list = bool(is_lost_dev is True or str(is_lost_dev).lower() == "true")
 
                     sys_status = {}
                     totals = {}
@@ -113,6 +151,10 @@ def get_live_data():
                     soc = safe_float(sys_status.get("SOC") or dev.get("capacity"))
                     v_bat = safe_float(sys_status.get("vBat"))
 
+                    inv_status = str(sys_status.get("status") or dev.get("deviceStatus") or "").strip()
+                    status_desc = str(sys_status.get("lost") or "").strip()
+                    fault_code = sys_status.get("proPto") or dev.get("proPto") or 0
+
                     e_today = safe_float(totals.get("epvToday") or plant.get("todayEnergy") or dev.get("eToday"))
                     e_to_grid = safe_float(totals.get("etoGridToday"))
                     e_to_user = safe_float(totals.get("elocalLoadToday"))
@@ -122,7 +164,11 @@ def get_live_data():
                     if e_to_user == 0.0 and e_today > 0 and e_today >= e_to_grid:
                         e_to_user = round(e_today - e_to_grid, 2)
 
+                    has_telemetry = bool(sys_status and (solar_w > 0 or p_load_w > 0 or p_grid_w > 0 or inv_status in ["1", "5", "normal"]))
+                    is_offline = lost_from_list and not has_telemetry
+
                     results.append({
+                        "sn": sn,
                         "label": display_name,
                         "solar_w": solar_w,
                         "p_grid_w": p_grid_w,
@@ -134,7 +180,9 @@ def get_live_data():
                         "e_to_user": e_to_user,
                         "e_charge": e_charge,
                         "e_discharge": e_discharge,
-                        "is_offline": is_lost and (solar_w == 0 and p_load_w == 0)
+                        "fault_code": fault_code,
+                        "inv_status": inv_status,
+                        "is_offline": is_offline
                     })
         except Exception as e:
             print(f"Error {label}: {e}")
@@ -169,12 +217,23 @@ class handler(BaseHTTPRequestHandler):
                 resp = f"⚡ <b>STATO IN TEMPO REALE</b> ({now_str})\n\n"
                 for item in data:
                     resp += f"📍 <b>{item['label']}</b>\n"
+                    fault_code = item.get("fault_code", 0)
                     if item.get("is_offline"):
-                        resp += "🔴 <i>Inverter OFFLINE</i>\n\n"
+                        resp += "🔴 <b>Stato:</b> <i>OFFLINE (Disconnesso)</i>\n"
+                    elif fault_code not in [0, "0", None, "", "00"]:
+                        fault_name, fault_detail = get_fault_description(fault_code)
+                        resp += f"⚠️ <b>ALLARME GUASTO: {fault_name} (Codice {fault_code})</b>\n"
+                        resp += f"   🛑 <i>{fault_detail}</i>\n"
                     else:
+                        resp += "🟢 <b>Stato:</b> <i>Operativo</i>\n"
+
+                    if not item.get("is_offline"):
                         resp += f"☀️ Solare: <b>{item['solar_w']} W</b>\n"
                         resp += f"🏠 Casa: <b>{item['p_load_w']} W</b> | 🔌 Rete: <b>{item['p_grid_w']} W</b>\n"
-                        resp += f"🔋 Batteria: <b>{item['soc']:.0f}%</b> ({item['v_bat']}V)\n\n"
+                        soc = item.get("soc")
+                        if soc is not None:
+                            resp += f"🔋 Batteria: <b>{soc:.0f}%</b> ({item['v_bat']}V)\n"
+                    resp += "\n"
 
                 if len(data) > 1:
                     resp += "━━━━━━━━━━━━━━━━━━━━\n"
