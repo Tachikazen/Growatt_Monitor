@@ -37,6 +37,32 @@ LONGITUDE = float(os.getenv("LONGITUDE", "9.19"))
 STATE_FILE = "state.json"
 TZ_ROME = ZoneInfo("Europe/Rome")
 
+# Dizionario Ufficiale Codici Errore e Guasti Growatt SPH / MIN / MIC
+GROWATT_FAULT_CODES = {
+    201: ("Corrente di Dispersione Elevata (Leakage Current High)", "Rilevata corrente di fuga verso terra superiore alla norma."),
+    202: ("Guasto Sensore Corrente (Sensor Fault)", "Anomalia nel sensore di lettura corrente interna."),
+    203: ("Sovracorrente Transitoria (Transient Overcurrent)", "Picco improvviso di corrente AC/DC oltre i limiti di sicurezza."),
+    300: ("Tensione Rete Enel Fuori Limite (AC V Outrange)", "La rete elettrica Enel ha superato la soglia di voltaggio massima o minima consentita."),
+    302: ("Frequenza Rete Enel Fuori Limite (AC F Outrange)", "La frequenza della rete Enel è instabile (diversa da 50 Hz)."),
+    303: ("Sovraccarico Uscita EPS (EPS Overload)", "I carichi collegati all'uscita di emergenza/backup superano la potenza massima."),
+    304: ("Errore Comunicazione BMS Batteria (BMS Open)", "Interrotta la linea di comunicazione dati CAN/RS485 tra inverter e batteria."),
+    401: ("Blocco Comunicazione Interna (DSP/COM Fault)", "Mancata risposta della scheda di controllo/porta di comunicazione interna."),
+    402: ("Sovratensione Bus DC (Bus Voltage High)", "Tensione del bus DC interno oltre la soglia di sicurezza."),
+    403: ("Tensione Batteria Bassa (Bat Voltage Low)", "La batteria è scesa al di sotto della tensione minima operativa."),
+    404: ("Guasto Relè di Rete (Grid Relay Fault)", "I relè di connessione alla rete elettrica non commutano correttamente."),
+    405: ("Guasto Relè Interno (Relay Fault)", "Anomalia nei relè di scambio interni all'inverter."),
+    406: ("Auto-Test Fallito (Auto Test Fault)", "Il controllo automatico di sicurezza iniziale non è andato a buon fine."),
+    407: ("Guasto Sensore HCT (HCT Fault)", "Anomalia nel sensore di corrente ad effetto Hall."),
+    408: ("Sovratemperatura Interna (Temp Over)", "Temperatura interna dell'inverter troppo elevata. Verificare ventilazione e dissipatore."),
+    409: ("Basso Isolamento PV (PV Isolation Low)", "Dispersione verso terra delle stringhe fotovoltaiche (frequente con pioggia o umidità elevata)."),
+    410: ("Sovratemperatura Induttanza (Inductor Temp Over)", "Surriscaldamento degli induttori interni di potenza."),
+    411: ("Sovratensione Stringa PV (PV Voltage High)", "La tensione a vuoto (Voc) dei pannelli solari ha superato il limite massimo dell'inverter."),
+    417: ("Guasto DSP Principale (DSP Fault)", "Anomalia nel microprocessore di calcolo principale DSP."),
+    418: ("Versione DSP non Compatibile (DSP Version Error)", "Incongruenza tra le versioni firmware DSP e HMI."),
+    420: ("Guasto Sensore NTC (NTC Fault)", "Sensore di rilevamento temperatura interno interrotto o in corto."),
+    425: ("Batteria Sottotensione Critica (Bat Under Voltage)", "La batteria ha raggiunto una scarica profonda e richiede ricarica di soccorso.")
+}
+
 MONTH_NAMES_IT = {
     1: "Gennaio", 2: "Febbraio", 3: "Marzo", 4: "Aprile",
     5: "Maggio", 6: "Giugno", 7: "Luglio", 8: "Agosto",
@@ -93,6 +119,17 @@ def safe_float(val, default=0.0) -> float:
         return float(str(val).replace("W", "").replace("kW", "").replace("%", "").strip())
     except (ValueError, TypeError):
         return default
+
+def get_fault_description(fault_code) -> tuple:
+    """Restituisce (Nome errore, Spiegazione dettagliata)"""
+    try:
+        code_int = int(fault_code)
+    except (ValueError, TypeError):
+        code_int = -1
+
+    if code_int in GROWATT_FAULT_CODES:
+        return GROWATT_FAULT_CODES[code_int]
+    return (f"Codice Guasto: {fault_code}", "Anomalia rilevata dall'inverter. Consultare il manuale tecnico Growatt.")
 
 def send_telegram(message: str, chat_id: str = None):
     target_chat = chat_id or TELEGRAM_CHAT_ID
@@ -299,21 +336,26 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, live_data: 
                 now_ts = time.time()
 
                 current_error_type = None
+                current_error_title = ""
                 current_error_msg = ""
 
                 if is_offline:
                     current_error_type = "OFFLINE"
-                    current_error_msg = "L'inverter non comunica con la rete o è spento."
+                    current_error_title = "🚨 <b>ALLARME: INVERTER OFFLINE</b>"
+                    current_error_msg = "L'inverter non comunica con la rete o la sezione Storage è spenta."
                     zero_count = 0
                 elif fault_code not in [0, "0", None, "", "00"]:
+                    fault_name, fault_detail = get_fault_description(fault_code)
                     current_error_type = f"ERRORE {fault_code}"
-                    current_error_msg = f"Codice Guasto: <code>{fault_code}</code>"
+                    current_error_title = f"⚠️ <b>ALLARME GUASTO: {fault_name} (Codice {fault_code})</b>"
+                    current_error_msg = f"🛑 <b>Dettaglio Errore:</b>\n{fault_detail}"
                     zero_count = 0
                 elif is_daytime and solar_w == 0 and inv_status not in ["1", "5", "Normal", "normal"]:
                     zero_count += 1
                     if zero_count >= 3:
                         current_error_type = "PRODUZIONE_ZERO"
-                        current_error_msg = f"Produzione solare ferma a 0 W nella fascia 09-18 ({zero_count * 10} min)."
+                        current_error_title = "⚠️ <b>AVVISO: PRODUZIONE SOLARE A ZERO</b>"
+                        current_error_msg = f"Produzione solare ferma a 0 W in pieno giorno per oltre {zero_count * 10} minuti consecutivi."
                 else:
                     zero_count = 0
 
@@ -328,10 +370,11 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, live_data: 
                         })
                         start_time_str = get_italian_time_str(now_ts)
                         send_telegram(
-                            f"🚨 <b>ALLARME: {current_error_type}</b>\n\n"
+                            f"{current_error_title}\n\n"
                             f"📍 <b>{display_name}</b>\n"
-                            f"🔢 Seriale: <code>{sn}</code>\n"
-                            f"📝 {current_error_msg}\n"
+                            f"🔢 Seriale: <code>{sn}</code>\n\n"
+                            f"{current_error_msg}\n\n"
+                            f"⚡ Potenza Attuale: <b>{solar_w} W</b>\n"
                             f"🕒 Inizio anomalia: <b>{start_time_str}</b>"
                         )
                     else:
@@ -371,47 +414,6 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, live_data: 
         except Exception as e:
             print(f"[-] Errore lettura {plant_name}: {e}")
             traceback.print_exc()
-
-def check_mismatch(live_data: list, is_daytime: bool, state: dict):
-    """Controlla se c'è un forte sbilanciamento di produzione tra i due impianti (possibile guasto stringa)"""
-    if not is_daytime or len(live_data) < 2:
-        state["mismatch_count"] = 0
-        return
-
-    inv1 = live_data[0]
-    inv2 = live_data[1]
-
-    if inv1.get("is_offline") or inv2.get("is_offline"):
-        state["mismatch_count"] = 0
-        return
-
-    w1 = inv1.get("solar_w", 0.0)
-    w2 = inv2.get("solar_w", 0.0)
-    max_w = max(w1, w2)
-
-    if max_w >= 1500.0:
-        diff_w = abs(w1 - w2)
-        diff_pct = (diff_w / max_w) * 100.0
-
-        if diff_pct >= 50.0:
-            mismatch_count = state.get("mismatch_count", 0) + 1
-            state["mismatch_count"] = mismatch_count
-            print(f"[*] Sbilanciamento rilevato: {diff_pct:.1f}% (Ciclo {mismatch_count}/3)")
-
-            if mismatch_count == 3:
-                lower_inv = inv2 if w2 < w1 else inv1
-                higher_inv = inv1 if w2 < w1 else inv2
-                send_telegram(
-                    f"⚠️ <b>AVVISO SBILANCIAMENTO IMPIANTI</b>\n\n"
-                    f"📍 {higher_inv['label']}: <b>{higher_inv['solar_w']} W</b>\n"
-                    f"📍 {lower_inv['label']}: <b>{lower_inv['solar_w']} W</b> (<code>-{diff_pct:.0f}%</code>)\n\n"
-                    f"⚠️ <b>{lower_inv['label']}</b> sta producendo molto meno da oltre 30 minuti.\n"
-                    f"🔍 <i>Possibile stringa staccata, sezionatore scattato o forte ombreggiamento anomalo.</i>"
-                )
-        else:
-            state["mismatch_count"] = 0
-    else:
-        state["mismatch_count"] = 0
 
 def format_monthly_report(now_rome: datetime, month_key: str, month_data: dict) -> str:
     month_num = int(month_key.split("-")[1])
@@ -695,13 +697,10 @@ def main():
     for acc in ACCOUNTS:
         check_account(acc, is_daytime, state, live_data, daily_stats)
 
-    # 1. Controllo anomalie sbilanciamento tra i 2 impianti
-    check_mismatch(live_data, is_daytime, state)
-
-    # 2. Controllo e invio Report Giornaliero e Mensile
+    # 1. Controllo e invio Report Giornaliero e Mensile
     handle_reports(now_rome, daily_stats, state)
 
-    # 3. Gestione eventuali comandi interattivi ricevuti su Telegram
+    # 2. Gestione eventuali comandi interattivi ricevuti su Telegram
     handle_telegram_commands(live_data, state)
 
     save_state(state)
