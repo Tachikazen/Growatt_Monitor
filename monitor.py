@@ -352,6 +352,11 @@ def check_account(account_info: dict, is_daytime: bool, state: dict, live_data: 
                     current_error_title = f"⚠️ <b>ALLARME GUASTO: {fault_name} (Codice {fault_code})</b>"
                     current_error_msg = f"🛑 <b>Dettaglio Errore:</b>\n{fault_detail}"
                     zero_count = 0
+                elif str(inv_status).strip() == "3":
+                    current_error_type = "GUASTO_INVERTER"
+                    current_error_title = "⚠️ <b>ALLARME GUASTO: INVERTER IN BLOCCO (Fault)</b>"
+                    current_error_msg = "L'inverter si trova in stato di errore/blocco interno (Status 3)."
+                    zero_count = 0
                 elif is_daytime and solar_w == 0 and inv_status not in ["1", "5", "Normal", "normal"]:
                     zero_count += 1
                     if zero_count >= 3:
@@ -622,12 +627,17 @@ def handle_telegram_commands(live_data: list, state: dict):
                 for item in live_data:
                     resp += f"📍 <b>{item['label']}</b>\n"
                     fault_code = item.get("fault_code", 0)
+                    inv_status_str = str(item.get("inv_status", "")).strip()
+
                     if item.get("is_offline"):
                         resp += "🔴 <b>Stato:</b> <i>OFFLINE (Disconnesso)</i>\n"
                     elif fault_code not in [0, "0", None, "", "00"]:
                         fault_name, fault_detail = get_fault_description(fault_code)
                         resp += f"⚠️ <b>ALLARME GUASTO: {fault_name} (Codice {fault_code})</b>\n"
                         resp += f"   🛑 <i>{fault_detail}</i>\n"
+                    elif inv_status_str == "3":
+                        resp += "⚠️ <b>Stato:</b> <b>IN BLOCCO / GUASTO (Fault)</b>\n"
+                        resp += "   🛑 <i>L'inverter è in stato di errore/blocco interno.</i>\n"
                     else:
                         resp += "🟢 <b>Stato:</b> <i>Operativo</i>\n"
 

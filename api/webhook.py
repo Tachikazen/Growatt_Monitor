@@ -218,12 +218,17 @@ class handler(BaseHTTPRequestHandler):
                 for item in data:
                     resp += f"📍 <b>{item['label']}</b>\n"
                     fault_code = item.get("fault_code", 0)
+                    inv_status_str = str(item.get("inv_status", "")).strip()
+
                     if item.get("is_offline"):
                         resp += "🔴 <b>Stato:</b> <i>OFFLINE (Disconnesso)</i>\n"
                     elif fault_code not in [0, "0", None, "", "00"]:
                         fault_name, fault_detail = get_fault_description(fault_code)
                         resp += f"⚠️ <b>ALLARME GUASTO: {fault_name} (Codice {fault_code})</b>\n"
                         resp += f"   🛑 <i>{fault_detail}</i>\n"
+                    elif inv_status_str == "3":
+                        resp += "⚠️ <b>Stato:</b> <b>IN BLOCCO / GUASTO (Fault)</b>\n"
+                        resp += "   🛑 <i>L'inverter è in stato di errore/blocco interno.</i>\n"
                     else:
                         resp += "🟢 <b>Stato:</b> <i>Operativo</i>\n"
 
