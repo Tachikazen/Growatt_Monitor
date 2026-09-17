@@ -3,7 +3,7 @@
     "in_error": false,
     "last_resolved": 1788450634.0298471,
     "zero_count": 0,
-    "last_known_soc": 96.0
+    "last_known_soc": 97.0
   },
   "QCM0DA70BL": {
     "in_error": false,
@@ -11,7 +11,7 @@
     "start_ts": 1789284034.6182907,
     "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
     "zero_count": 0,
-    "last_known_soc": 86.0,
+    "last_known_soc": 85.0,
     "last_resolved": 1789375235.7976255
   },
   "last_daily_report_date": "2026-09-16",
