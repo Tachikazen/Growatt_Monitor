@@ -3,7 +3,7 @@
     "in_error": false,
     "last_resolved": 1789965636.8839157,
     "zero_count": 0,
-    "last_known_soc": 88.0,
+    "last_known_soc": 87.0,
     "error_type": "OFFLINE",
     "start_ts": 1789947633.3135016,
     "display_name": "Impianto 1 (TONELLO DARIO) - QCM0DA70C6"
@@ -14,7 +14,7 @@
     "start_ts": 1789947635.4602396,
     "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
     "zero_count": 0,
-    "last_known_soc": 73.0,
+    "last_known_soc": 72.0,
     "last_resolved": 1789965639.274746
   },
   "last_daily_report_date": "2026-09-24",
