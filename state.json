@@ -2,7 +2,7 @@
   "QCM0DA70C6": {
     "in_error": false,
     "last_resolved": 1791359433.4122293,
-    "zero_count": 0,
+    "zero_count": 1,
     "last_known_soc": 7.0,
     "error_type": "OFFLINE",
     "start_ts": 1791302460.04601,
@@ -13,7 +13,7 @@
     "error_type": "OFFLINE",
     "start_ts": 1791302462.091373,
     "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
-    "zero_count": 0,
+    "zero_count": 1,
     "last_known_soc": 8.0,
     "last_resolved": 1791359435.2804787
   },
