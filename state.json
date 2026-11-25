@@ -1,21 +1,21 @@
 {
   "QCM0DA70C6": {
-    "in_error": true,
-    "last_resolved": 1791359433.4122293,
-    "zero_count": 4,
+    "in_error": false,
+    "last_resolved": 1795626069.3030546,
+    "zero_count": 0,
     "last_known_soc": 7.0,
     "error_type": "PRODUZIONE_ZERO",
     "start_ts": 1795624840.3325684,
     "display_name": "Impianto 1 (KWK1CKJ4NT) - QCM0DA70C6"
   },
   "QCM0DA70BL": {
-    "in_error": true,
+    "in_error": false,
     "error_type": "PRODUZIONE_ZERO",
     "start_ts": 1795624843.101466,
     "display_name": "Impianto 2 (KWK1CKJ4NW) - QCM0DA70BL",
-    "zero_count": 4,
+    "zero_count": 0,
     "last_known_soc": 8.0,
-    "last_resolved": 1791359435.2804787
+    "last_resolved": 1795626071.9472241
   },
   "last_daily_report_date": "2026-10-21",
   "monthly": {
