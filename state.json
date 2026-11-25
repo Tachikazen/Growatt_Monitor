@@ -1,19 +1,19 @@
 {
   "QCM0DA70C6": {
-    "in_error": false,
+    "in_error": true,
     "last_resolved": 1791359433.4122293,
-    "zero_count": 2,
+    "zero_count": 3,
     "last_known_soc": 7.0,
-    "error_type": "OFFLINE",
-    "start_ts": 1791302460.04601,
-    "display_name": "Impianto 1 (TONELLO DARIO) - QCM0DA70C6"
+    "error_type": "PRODUZIONE_ZERO",
+    "start_ts": 1795624840.3325684,
+    "display_name": "Impianto 1 (KWK1CKJ4NT) - QCM0DA70C6"
   },
   "QCM0DA70BL": {
-    "in_error": false,
-    "error_type": "OFFLINE",
-    "start_ts": 1791302462.091373,
-    "display_name": "Impianto 2 (Guananga Rita) - QCM0DA70BL",
-    "zero_count": 2,
+    "in_error": true,
+    "error_type": "PRODUZIONE_ZERO",
+    "start_ts": 1795624843.101466,
+    "display_name": "Impianto 2 (KWK1CKJ4NW) - QCM0DA70BL",
+    "zero_count": 3,
     "last_known_soc": 8.0,
     "last_resolved": 1791359435.2804787
   },
