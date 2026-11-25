@@ -17,7 +17,7 @@
     "last_known_soc": 7.0,
     "last_resolved": 1795626071.9472241
   },
-  "last_daily_report_date": "2026-10-21",
+  "last_daily_report_date": "2026-11-25",
   "monthly": {
     "2026-09": {
       "QCM0DA70C6": {
@@ -159,7 +159,30 @@
         ]
       }
     },
-    "2026-11": {}
+    "2026-11": {
+      "QCM0DA70C6": {
+        "label": "Impianto 1 (KWK1CKJ4NT) - QCM0DA70C6",
+        "production": 3.1,
+        "to_grid": 0.0,
+        "to_user": 17.2,
+        "charge": 0.3,
+        "discharge": 1.0,
+        "days": [
+          "2026-11-25"
+        ]
+      },
+      "QCM0DA70BL": {
+        "label": "Impianto 2 (KWK1CKJ4NW) - QCM0DA70BL",
+        "production": 3.2,
+        "to_grid": 0.1,
+        "to_user": 10.4,
+        "charge": 1.6,
+        "discharge": 0.0,
+        "days": [
+          "2026-11-25"
+        ]
+      }
+    }
   },
   "mismatch_count": 9,
   "last_telegram_update_id": 499964515,
